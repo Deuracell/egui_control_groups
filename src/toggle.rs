@@ -11,6 +11,7 @@ use egui::{
 };
 
 use crate::content::CellContent;
+use crate::geometry::corner_radius_for;
 use crate::geometry::{Orientation, index_at, layout_cells, range_between};
 use crate::paint::frame_shapes;
 use crate::style::GroupStyle;
@@ -548,11 +549,14 @@ impl Widget for ToggleGroup<'_> {
         for (i, r) in responses.iter().enumerate() {
             let on = *values[i];
             let shown = if on { &ons[i] } else { &offs[i] };
-            let label = tooltips[i]
-                .clone()
-                .or_else(|| shown.accessible_label())
-                .unwrap_or_default();
-            r.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, on, label.clone()));
+            let enabled = ui.is_enabled();
+            r.widget_info(|| {
+                let label = tooltips[i]
+                    .clone()
+                    .or_else(|| shown.accessible_label())
+                    .unwrap_or_default();
+                WidgetInfo::selected(WidgetType::Button, enabled, on, label)
+            });
             if r.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 if let Some(text) = &tooltips[i] {
@@ -587,6 +591,17 @@ impl Widget for ToggleGroup<'_> {
             };
             let shown = if on { &ons[i] } else { &offs[i] };
             shown.paint(ui, rects[i], color);
+        }
+        // Keyboard focus ring, following each cell's own corner rounding.
+        for (i, r) in responses.iter().enumerate() {
+            if r.has_focus() {
+                ui.painter().add(Shape::rect_stroke(
+                    rects[i],
+                    corner_radius_for(i, n, orientation, st.radius),
+                    ui.visuals().selection.stroke,
+                    egui::StrokeKind::Inside,
+                ));
+            }
         }
 
         if changed {
