@@ -7,7 +7,8 @@ between cells.
 - **`ToggleGroup`**: a row or column of toggle buttons. Press one and drag
   across the others to set them all to the same state. Cells can hold text,
   an `egui::Image` (via `Icon`), custom painting (`PaintCell`), or any type
-  implementing `CellContent`.
+  implementing `CellContent`. `.exclusive(true)` makes a press select only that
+  cell; Shift (a long press on touch) adds to the selection, as in Blender.
 - **`FieldGroup`**: a row or column of text or number fields. Click to edit
   one, or drag across several and type once to edit them all. Enter or
   clicking away commits; Escape cancels.
