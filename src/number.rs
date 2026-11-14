@@ -51,7 +51,13 @@ macro_rules! number_int {
                 self.to_string()
             }
             fn parse_number(text: &str) -> Option<Self> {
-                text.parse::<$t>().ok()
+                // Saturate: a valid integer outside the type's range becomes
+                // its MIN / MAX; text that is not an integer is rejected.
+                text.parse::<$t>().ok().or_else(|| {
+                    let digits = text.strip_prefix(['+', '-']).unwrap_or(text);
+                    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+                        .then(|| if text.starts_with('-') { <$t>::MIN } else { <$t>::MAX })
+                })
             }
             fn round_to(self, _precision: usize) -> Self {
                 self
@@ -81,7 +87,9 @@ number_int!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
 ///   only). A committed float is rounded to it, so the value always matches
 ///   what is displayed. Without it floats show up to six decimals, trailing
 ///   zeros removed.
-/// * [`range`](Self::range) clamps committed values into the range.
+/// * [`range`](Self::range) clamps committed values into the range. Integers
+///   typed beyond their type's limits saturate first (`300` into a `u8` is
+///   `255`, then clamped to the range).
 /// * [`prefix`](Self::prefix) and [`suffix`](Self::suffix) are shown around
 ///   the number and accepted, but not required, when parsing.
 ///

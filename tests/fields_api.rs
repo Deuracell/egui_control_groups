@@ -62,7 +62,7 @@ impl Fields {
     }
 
     fn editing(&self) -> bool {
-        self.ctx.egui_wants_keyboard_input()
+        self.ctx.text_edit_focused()
     }
 
     fn click(&mut self, i: usize) {
