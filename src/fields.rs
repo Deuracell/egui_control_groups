@@ -4,6 +4,7 @@
 
 use std::hash::Hash;
 
+use egui::style::ScrollAnimation;
 use egui::text::{CCursor, CCursorRange, CharIndex};
 use egui::{
     Align, Color32, Id, Key, Margin, Modifiers, Pos2, Rect, Response, Sense, Shape, TextEdit,
@@ -552,22 +553,32 @@ impl Widget for FieldGroup<'_> {
                     })
                 })
                 .or(pointer);
-            if let (TouchMode::Pending, Some(pos), Some(anchor)) =
-                (state.touch_mode, pos, state.press)
-            {
+            if state.touch_mode == TouchMode::Cancelled && down {
+                // Cells take the drag from a scroll area they sit in, so pass
+                // the swipe on to it.
+                let delta = ui.input(|i| i.pointer.delta());
+                ui.scroll_with_delta_animation(delta, ScrollAnimation::none());
+            }
+            if let (TouchMode::Pending, Some(pos)) = (state.touch_mode, pos) {
                 let now = ui.input(|i| i.time);
                 let held = now - state.press_start >= long_press;
-                if pos.distance(state.press_origin) > max_dist {
-                    // Crossing into a horizontal neighbour is a drag-select; a
-                    // vertical move is only one after a hold, as otherwise it
-                    // cannot be told from a swipe.
-                    let crossed = index_at(&cells, pos, orientation) != anchor;
-                    state.touch_mode =
-                        if held || (crossed && orientation == Orientation::Horizontal) {
-                            TouchMode::Drag
-                        } else {
-                            TouchMode::Cancelled
-                        };
+                let moved = pos - state.press_origin;
+                if moved.length() > max_dist {
+                    // Too far for a tap. A finger crosses this long before it
+                    // reaches the next field, so go by direction: along a row
+                    // of fields is a drag-select, across it a swipe. In a
+                    // column a move is only a drag-select after a hold, as
+                    // otherwise it cannot be told from a swipe.
+                    let along_row =
+                        orientation == Orientation::Horizontal && moved.x.abs() >= moved.y.abs();
+                    if held || along_row {
+                        state.touch_mode = TouchMode::Drag;
+                    } else {
+                        state.touch_mode = TouchMode::Cancelled;
+                        if down {
+                            ui.scroll_with_delta_animation(moved, ScrollAnimation::none());
+                        }
+                    }
                 } else if now - state.press_start < long_press {
                     touch_hold_pending = true;
                 }

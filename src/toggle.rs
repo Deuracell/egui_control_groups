@@ -5,6 +5,7 @@
 use std::hash::Hash;
 use std::rc::Rc;
 
+use egui::style::ScrollAnimation;
 use egui::{
     Color32, Id, Key, Modifiers, Popup, Pos2, Rect, Response, Sense, Shape, Stroke, TextStyle, Ui,
     Vec2, Widget, WidgetInfo, WidgetType, pos2, vec2,
@@ -99,9 +100,15 @@ enum Mode {
     /// Touch, not yet decided: a tap acts on release, moving to another cell
     /// starts a drag, and in an exclusive group a long press extends.
     Pending { start: f64, pos: Pos2 },
+    /// Touch that has moved along the group but is still on the cell it began
+    /// on: no longer a tap or a long press, and a drag once it reaches
+    /// another cell.
+    Armed,
+    /// Touch that moved across the group instead of along it: a swipe, which
+    /// scrolls the surrounding scroll area and leaves the cells alone.
+    Scroll,
     /// The rest of the gesture does nothing: an extending press that changed
-    /// nothing (it would have switched off the last active cell), or a touch
-    /// that strayed too far from where it began to be a tap.
+    /// nothing (it would have switched off the last active cell).
     Inert,
 }
 
@@ -590,7 +597,8 @@ impl Widget for ToggleGroup<'_> {
         let frame_nr = ui.ctx().cumulative_frame_nr();
         // Scrolled out of view: the cells stay registered (so Tab reaches them
         // and a focused cell keeps focus and keyboard activation), but nothing
-        // is painted and pointer gestures are dropped.
+        // is painted and pointer gestures are dropped (but for a swipe, which
+        // goes on scrolling).
         let visible = ui.is_rect_visible(group_rect);
         let rects = layout_cells(group_rect.min, &mains, cross, orientation);
         let responses: Vec<Response> = rects
@@ -611,7 +619,7 @@ impl Widget for ToggleGroup<'_> {
         let (pressed, down, pointer, modifiers, touch, now) = ui.input(|i| {
             (
                 visible && i.pointer.primary_pressed(),
-                visible && i.pointer.primary_down(),
+                i.pointer.primary_down(),
                 i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()),
                 i.modifiers,
                 // A tap can start and end within one frame, leaving no touch
@@ -632,9 +640,10 @@ impl Widget for ToggleGroup<'_> {
         let extending = allow_extend && held(modifiers, extend);
         // A gesture not touched last frame belongs to an earlier showing of
         // this group (hidden or culled mid-drag): discard it.
-        let mut gesture: Option<Gesture> = ui
-            .data(|d| d.get_temp::<Gesture>(id))
-            .filter(|g| visible && g.frame.saturating_add(1) >= frame_nr);
+        let mut gesture: Option<Gesture> = ui.data(|d| d.get_temp::<Gesture>(id)).filter(|g| {
+            // A swipe carries on after it has scrolled the group away.
+            (visible || matches!(g.mode, Mode::Scroll)) && g.frame.saturating_add(1) >= frame_nr
+        });
         let was_active = gesture.is_some();
         let mut began = false;
         let mut changed = false;
@@ -713,24 +722,36 @@ impl Widget for ToggleGroup<'_> {
                         g.last = idx;
                     }
                 }
-                Mode::Pending { start, pos: origin } => {
-                    if idx != g.last {
-                        // Moved to another cell: a drag, not a tap.
-                        if exclusive {
-                            changed |= select_only(&mut values, idx);
-                            g.mode = Mode::Move;
-                        } else {
-                            let target = !is_on(&values, g.last);
-                            for k in range_between(g.last, idx) {
-                                changed |= set_cell(&mut values, k, target, false);
-                            }
-                            g.mode = Mode::Paint(target);
+                Mode::Pending { .. } | Mode::Armed if idx != g.last => {
+                    // Moved to another cell: a drag, not a tap.
+                    if exclusive {
+                        changed |= select_only(&mut values, idx);
+                        g.mode = Mode::Move;
+                    } else {
+                        let target = !is_on(&values, g.last);
+                        for k in range_between(g.last, idx) {
+                            changed |= set_cell(&mut values, k, target, false);
                         }
-                        g.last = idx;
-                    } else if pos.distance(origin) > max_dist {
-                        // Wandered off within the same cell (a scroll, say):
-                        // neither a tap nor a long press any more.
-                        g.mode = Mode::Inert;
+                        g.mode = Mode::Paint(target);
+                    }
+                    g.last = idx;
+                }
+                Mode::Pending { start, pos: origin } => {
+                    let moved = pos - origin;
+                    if moved.length() > max_dist {
+                        // Too far for a tap or a long press. A finger crosses
+                        // this long before it reaches the next cell, so tell
+                        // a drag along the group from a swipe across it.
+                        let (along, across) = match orientation {
+                            Orientation::Horizontal => (moved.x, moved.y),
+                            Orientation::Vertical => (moved.y, moved.x),
+                        };
+                        if across.abs() > along.abs() {
+                            g.mode = Mode::Scroll;
+                            ui.scroll_with_delta_animation(moved, ScrollAnimation::none());
+                        } else {
+                            g.mode = Mode::Armed;
+                        }
                     } else if exclusive && allow_extend {
                         if now - start >= long_press {
                             let (c, mode) = extend_press(&mut values, g.last, require_one);
@@ -744,7 +765,13 @@ impl Widget for ToggleGroup<'_> {
                         }
                     }
                 }
-                Mode::Inert => {}
+                Mode::Armed | Mode::Inert => {}
+                Mode::Scroll => {
+                    // Cells take the drag from a scroll area they sit in, so
+                    // pass the swipe on to it.
+                    let delta = ui.input(|i| i.pointer.delta());
+                    ui.scroll_with_delta_animation(delta, ScrollAnimation::none());
+                }
             }
         }
         if !down {
