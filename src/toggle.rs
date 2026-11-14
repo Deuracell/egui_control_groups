@@ -169,6 +169,7 @@ pub struct ToggleGroup<'a> {
     exclusive: bool,
     require_one: bool,
     extend: Modifiers,
+    allow_extend: bool,
     settle_press: bool,
     style: GroupStyle,
 }
@@ -186,6 +187,7 @@ impl<'a> ToggleGroup<'a> {
             exclusive: false,
             require_one: false,
             extend: Modifiers::SHIFT,
+            allow_extend: true,
             settle_press: cfg!(target_arch = "wasm32"),
             style: GroupStyle::default(),
         }
@@ -286,6 +288,16 @@ impl<'a> ToggleGroup<'a> {
         self
     }
 
+    /// Whether an [exclusive](Self::exclusive) group can be extended to
+    /// several active cells with the [extend modifier](Self::extend_modifier)
+    /// or a long press on touch. Default `true`. With `false` a press always
+    /// selects only the pressed cell. For a group bound to a single value,
+    /// see [`RadioGroup`](crate::RadioGroup).
+    pub fn allow_extend(mut self, allow: bool) -> Self {
+        self.allow_extend = allow;
+        self
+    }
+
     /// The modifier that makes a press extend instead of select in an
     /// [exclusive](Self::exclusive) group. Default [`Modifiers::SHIFT`]; use
     /// [`Modifiers::COMMAND`] for Cmd on macOS and Ctrl elsewhere. Does not
@@ -364,6 +376,7 @@ impl Widget for ToggleGroup<'_> {
             exclusive,
             require_one,
             extend,
+            allow_extend,
             settle_press,
             style,
         } = self;
@@ -457,7 +470,7 @@ impl Widget for ToggleGroup<'_> {
                 o.input_options.max_click_dist,
             )
         });
-        let extending = held(modifiers, extend);
+        let extending = allow_extend && held(modifiers, extend);
         // A gesture not touched last frame belongs to an earlier showing of
         // this group (hidden or culled mid-drag): discard it.
         let mut gesture: Option<Gesture> = ui
@@ -551,7 +564,7 @@ impl Widget for ToggleGroup<'_> {
                         // Wandered off within the same cell (a scroll, say):
                         // neither a tap nor a long press any more.
                         g.mode = Mode::Inert;
-                    } else if exclusive {
+                    } else if exclusive && allow_extend {
                         if now - start >= long_press {
                             let (c, mode) = extend_press(&mut values, g.last, require_one);
                             changed |= c;
