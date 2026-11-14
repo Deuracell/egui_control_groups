@@ -9,9 +9,18 @@ between cells.
   an `egui::Image` (via `Icon`), custom painting (`PaintCell`), or any type
   implementing `CellContent`. `.exclusive(true)` makes a press select only that
   cell; Shift (a long press on touch) adds to the selection, as in Blender.
+  `.width(w)` or `.fill_width()` sets the width of the whole group.
 - **`FieldGroup`**: a row or column of text or number fields. Click to edit
   one, or drag across several and type once to edit them all. Enter or
-  clicking away commits; Escape cancels.
+  clicking away commits; Escape cancels. Tab commits and opens the next
+  field (Shift+Tab the previous one); `.tab_behavior(TabBehavior::Wrap)` wraps
+  around at the ends instead of moving focus on. `Number` wraps a value to
+  give it a fixed precision, a range, a prefix or a suffix. `fields()` adds
+  one field per array element, and `.width(w)` / `.fill_width()` set the width
+  of the group.
+
+Both groups work from the keyboard: Tab to a cell, then Space or Enter to
+toggle it or open the field for editing.
 
 Colours, radius and padding come from the current `egui::Style`; use
 `GroupStyle` to override them.
@@ -27,12 +36,20 @@ Release tags mirror the egui version they target: the minor version tracks egui 
 A tag is a fixed snapshot: it never moves. `main` targets the newest egui and may be ahead of the latest tag, with unreleased and possibly breaking changes, so depend on a tag rather than on `main`.
 
 ```rust
-use egui_control_groups::{FieldGroup, ToggleGroup};
+use egui_control_groups::{FieldGroup, Number, ToggleGroup};
 
 ui.add(ToggleGroup::new("axes").cells(["X", "Y", "Z"], &mut axes).equal_width());
 
-let [x, y, z] = &mut position;
-ui.add(FieldGroup::new("pos").labeled("X", x).labeled("Y", y).labeled("Z", z).vertical());
+ui.add(FieldGroup::new("pos").fields(["X", "Y", "Z"], &mut position).vertical());
+```
+
+`Number` borrows the value, so bind it to a variable first. Here the group
+also fills the available width:
+
+```rust
+let mut w = Number::new(&mut width).precision(1).range(0.0..=500.0).suffix(" px");
+let mut h = Number::new(&mut height).precision(1).range(0.0..=500.0).suffix(" px");
+ui.add(FieldGroup::new("size").labeled("W", &mut w).labeled("H", &mut h).fill_width());
 ```
 
 Cells can show a different icon per state, with the active fill turned off:
