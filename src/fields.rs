@@ -91,6 +91,8 @@ struct Entry<'a> {
 struct State {
     /// Cell the pointer went down on, while the button is held.
     press: Option<usize>,
+    /// A finger (not a mouse) was seen during the current press.
+    press_touch: bool,
     edit: Option<Edit>,
 }
 
@@ -103,6 +105,9 @@ struct Edit {
     buffer: String,
     /// First frame: select all and take focus, ignore commit checks.
     fresh: bool,
+    /// The session was started or used by touch. A touch screen has no
+    /// Escape key, so tapping away cancels there and only Enter commits.
+    touch: bool,
 }
 
 /// Joined text or number fields with multi-edit.
@@ -124,7 +129,8 @@ struct Edit {
 /// ```
 ///
 /// * Click a field to edit it. All text is selected; Enter or clicking away
-///   commits, Escape cancels.
+///   commits, Escape cancels. On a touch screen, where there is no Escape,
+///   tapping away cancels instead and only Enter commits.
 /// * Press in one field and drag across others to select several. The
 ///   selected fields are highlighted; type a value and commit to write it to
 ///   every one of them.
@@ -229,9 +235,19 @@ impl Widget for FieldGroup<'_> {
         let bg_slot = ui.painter().add(Shape::Noop);
         let te_id = id.with("editor");
 
+        // On the web the pointer event is handled a frame before the touch
+        // event, so a touch is only noticed from the frame after the press.
+        let touch_now = ui.input(|i| {
+            i.any_touches()
+                || i.events
+                    .iter()
+                    .any(|e| matches!(e, egui::Event::Touch { .. }))
+        });
+
         // 1. The live text editor, if a session is active.
         let mut finish: Option<bool> = None;
         if let Some(edit) = state.edit.as_mut() {
+            edit.touch |= touch_now;
             if edit.fresh {
                 let len = edit.buffer.chars().count();
                 let mut te_state = TextEdit::load_state(ui.ctx(), te_id).unwrap_or_default();
@@ -254,13 +270,14 @@ impl Widget for FieldGroup<'_> {
                 .horizontal_align(Align::Center)
                 .desired_width(area.width());
             let out = ui.place(area, editor);
-            let escape = ui.input(|i| i.key_pressed(Key::Escape));
+            let (escape, enter) =
+                ui.input(|i| (i.key_pressed(Key::Escape), i.key_pressed(Key::Enter)));
             if edit.fresh {
                 edit.fresh = false;
             } else if escape {
                 finish = Some(false);
             } else if out.lost_focus() {
-                finish = Some(true);
+                finish = Some(enter || !edit.touch);
             }
         }
         if let Some(commit) = finish
@@ -290,6 +307,9 @@ impl Widget for FieldGroup<'_> {
             {
                 state.press = Some(i);
             }
+            if state.press.is_some() {
+                state.press_touch |= touch_now;
+            }
             if let Some(anchor) = state.press {
                 match pointer {
                     Some(pos) => {
@@ -305,13 +325,18 @@ impl Widget for FieldGroup<'_> {
                                     host: anchor,
                                     buffer: entries[anchor].value.to_field_text(),
                                     fresh: true,
+                                    touch: state.press_touch,
                                 });
                                 ui.ctx().request_repaint();
                             }
                             state.press = None;
+                            state.press_touch = false;
                         }
                     }
-                    None if !down => state.press = None,
+                    None if !down => {
+                        state.press = None;
+                        state.press_touch = false;
+                    }
                     None => {}
                 }
             } else if let Some(i) = responses.iter().position(Response::has_focus)
@@ -323,6 +348,7 @@ impl Widget for FieldGroup<'_> {
                     host: i,
                     buffer: entries[i].value.to_field_text(),
                     fresh: true,
+                    touch: false,
                 });
                 ui.ctx().request_repaint();
             }
