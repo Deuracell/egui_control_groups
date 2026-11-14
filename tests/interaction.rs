@@ -13,6 +13,7 @@ use std::cell::RefCell;
 struct Painted {
     texts: Vec<String>,
     fills: Vec<Color32>,
+    lines: Vec<[Pos2; 2]>,
 }
 
 fn collect(shape: &Shape, out: &mut Painted) {
@@ -20,6 +21,7 @@ fn collect(shape: &Shape, out: &mut Painted) {
         Shape::Vec(v) => v.iter().for_each(|s| collect(s, out)),
         Shape::Text(t) => out.texts.push(t.galley.text().to_owned()),
         Shape::Rect(r) => out.fills.push(r.fill),
+        Shape::LineSegment { points, .. } => out.lines.push(*points),
         _ => {}
     }
 }
@@ -976,4 +978,27 @@ fn mouse_click_away_still_commits() {
     h.release(away, |ui| f.show(ui));
     h.idle(|ui| f.show(ui));
     assert_eq!(f.v, [1.0, 42.0, 3.0]);
+}
+
+#[test]
+fn dividers_stay_inside_the_outline() {
+    // A divider running to the group's edge can poke out past the outline
+    // after pixel snapping, so it must end inside the outline's stroke.
+    for vertical in [false, true] {
+        let (mut h, mut t) = (Harness::new(), Toggles::new(vec![false; 3]));
+        if vertical {
+            t.orientation = Orientation::Vertical;
+        }
+        warm(&mut h, &mut t);
+        assert_eq!(h.painted.lines.len(), 2, "two dividers between three cells");
+        let r = t.rect;
+        for [a, b] in &h.painted.lines {
+            for p in [a, b] {
+                assert!(
+                    r.shrink(0.25).contains(*p),
+                    "divider end {p:?} reaches the edge of {r:?}"
+                );
+            }
+        }
+    }
 }
