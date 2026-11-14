@@ -235,17 +235,19 @@ impl<'a> ToggleGroup<'a> {
         labels: impl IntoIterator<Item = L>,
         values: &'a mut [bool],
     ) -> Self {
-        let labels: Vec<L> = labels.into_iter().collect();
-        debug_assert_eq!(
-            labels.len(),
-            values.len(),
-            "ToggleGroup::cells: {} labels but {} values; the extra ones would be silently dropped",
-            labels.len(),
-            values.len()
-        );
-        for (label, value) in labels.into_iter().zip(values.iter_mut()) {
-            self = self.cell(label, value);
+        let n_values = values.len();
+        let mut n_labels = 0;
+        let mut values = values.iter_mut();
+        for label in labels {
+            n_labels += 1;
+            if let Some(value) = values.next() {
+                self = self.cell(label, value);
+            }
         }
+        debug_assert_eq!(
+            n_labels, n_values,
+            "ToggleGroup::cells: {n_labels} labels but {n_values} values; the extra ones would be silently dropped",
+        );
         self
     }
 
@@ -422,12 +424,10 @@ impl Widget for ToggleGroup<'_> {
         };
         let (group_rect, mut response) = ui.allocate_exact_size(total, Sense::hover());
         let frame_nr = ui.ctx().cumulative_frame_nr();
-        if !ui.is_rect_visible(group_rect) {
-            // Scrolled out of view: space is allocated, but there is nothing
-            // to interact with or paint. Drop any gesture so it can't resume.
-            ui.data_mut(|d| d.remove::<Gesture>(id));
-            return response;
-        }
+        // Scrolled out of view: the cells stay registered (so Tab reaches them
+        // and a focused cell keeps focus and keyboard activation), but nothing
+        // is painted and pointer gestures are dropped.
+        let visible = ui.is_rect_visible(group_rect);
         let rects = layout_cells(group_rect.min, &mains, cross, orientation);
         let responses: Vec<Response> = rects
             .iter()
@@ -438,8 +438,8 @@ impl Widget for ToggleGroup<'_> {
         // Interaction.
         let (pressed, down, pointer, modifiers, touch, now) = ui.input(|i| {
             (
-                i.pointer.primary_pressed(),
-                i.pointer.primary_down(),
+                visible && i.pointer.primary_pressed(),
+                visible && i.pointer.primary_down(),
                 i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()),
                 i.modifiers,
                 // A tap can start and end within one frame, leaving no touch
@@ -462,7 +462,7 @@ impl Widget for ToggleGroup<'_> {
         // this group (hidden or culled mid-drag): discard it.
         let mut gesture: Option<Gesture> = ui
             .data(|d| d.get_temp::<Gesture>(id))
-            .filter(|g| g.frame.saturating_add(1) >= frame_nr);
+            .filter(|g| visible && g.frame.saturating_add(1) >= frame_nr);
         let was_active = gesture.is_some();
         let mut began = false;
         let mut changed = false;
@@ -630,12 +630,22 @@ impl Widget for ToggleGroup<'_> {
                     .unwrap_or_default();
                 WidgetInfo::selected(WidgetType::Button, enabled, on, label)
             });
+            if r.gained_focus() {
+                r.scroll_to_me(None);
+            }
             if r.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 if let Some(text) = &tooltips[i] {
                     r.clone().on_hover_text(text);
                 }
             }
+        }
+
+        if !visible {
+            if changed {
+                response.mark_changed();
+            }
+            return response;
         }
 
         // Paint.
@@ -655,6 +665,9 @@ impl Widget for ToggleGroup<'_> {
             .collect();
         let shapes: Vec<Shape> = frame_shapes(group_rect, &rects, orientation, &st, &fills);
         ui.painter().extend(shapes);
+        // Clip each cell's content to its own cell, so a width that squeezes
+        // cells below their content can't spill into the neighbours.
+        let outer_clip = ui.clip_rect();
         for i in 0..n {
             let on = *values[i];
             let color = if highlight_active && on {
@@ -663,8 +676,10 @@ impl Widget for ToggleGroup<'_> {
                 st.text
             };
             let shown = if on { &ons[i] } else { &offs[i] };
+            ui.set_clip_rect(outer_clip.intersect(rects[i]));
             shown.paint(ui, rects[i], color);
         }
+        ui.set_clip_rect(outer_clip);
         // Keyboard focus ring, following each cell's own corner rounding.
         for (i, r) in responses.iter().enumerate() {
             if r.has_focus() {
