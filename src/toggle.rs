@@ -11,9 +11,11 @@ use egui::{
 };
 
 use crate::content::CellContent;
+use crate::geometry::corner_radius_for;
 use crate::geometry::{Orientation, index_at, layout_cells, range_between};
 use crate::paint::frame_shapes;
 use crate::style::GroupStyle;
+use crate::width::{Width, distribute};
 
 struct Cell<'a> {
     off: Rc<dyn CellContent + 'a>,
@@ -35,8 +37,9 @@ enum Mode {
     /// Touch, not yet decided: a tap acts on release, moving to another cell
     /// starts a drag, and in an exclusive group a long press extends.
     Pending { start: f64, pos: Pos2 },
-    /// An extending press that changed nothing (it would have switched off
-    /// the last active cell); dragging does nothing.
+    /// The rest of the gesture does nothing: an extending press that changed
+    /// nothing (it would have switched off the last active cell), or a touch
+    /// that strayed too far from where it began to be a tap.
     Inert,
 }
 
@@ -46,6 +49,9 @@ struct Gesture {
     mode: Mode,
     /// Last cell index visited, so skipped cells can be filled in.
     last: usize,
+    /// Frame this was last updated in, to drop a gesture whose group stopped
+    /// being shown (and so never saw the release).
+    frame: u64,
 }
 
 fn count_on(values: &[&mut bool]) -> usize {
@@ -158,6 +164,7 @@ pub struct ToggleGroup<'a> {
     cells: Vec<Cell<'a>>,
     orientation: Orientation,
     equal_size: bool,
+    width: Width,
     highlight_active: bool,
     exclusive: bool,
     require_one: bool,
@@ -174,6 +181,7 @@ impl<'a> ToggleGroup<'a> {
             cells: Vec::new(),
             orientation: Orientation::Horizontal,
             equal_size: false,
+            width: Width::Auto,
             highlight_active: true,
             exclusive: false,
             require_one: false,
@@ -227,6 +235,14 @@ impl<'a> ToggleGroup<'a> {
         labels: impl IntoIterator<Item = L>,
         values: &'a mut [bool],
     ) -> Self {
+        let labels: Vec<L> = labels.into_iter().collect();
+        debug_assert_eq!(
+            labels.len(),
+            values.len(),
+            "ToggleGroup::cells: {} labels but {} values; the extra ones would be silently dropped",
+            labels.len(),
+            values.len()
+        );
         for (label, value) in labels.into_iter().zip(values.iter_mut()) {
             self = self.cell(label, value);
         }
@@ -298,8 +314,32 @@ impl<'a> ToggleGroup<'a> {
     }
 
     /// Give every cell the width of the widest one (horizontal groups).
+    ///
+    /// This sets the natural size only: an explicit [`width`](Self::width) or
+    /// [`fill_width`](Self::fill_width) wins, and then scales these equal
+    /// cells, which therefore stay equal.
     pub fn equal_width(mut self) -> Self {
         self.equal_size = true;
+        self
+    }
+
+    /// Make the whole group exactly `width` points wide.
+    ///
+    /// Horizontal groups share the width between their cells in proportion to
+    /// their natural widths (so [`equal_width`](Self::equal_width) cells stay
+    /// equal), down to a small minimum per cell; cells may become narrower
+    /// than `interact_size.x`. Vertical groups get this as their cross-axis
+    /// width. Takes precedence over `equal_width`. A non-finite or negative
+    /// value is ignored. Default: natural size.
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = Width::Fixed(width);
+        self
+    }
+
+    /// Like [`width`](Self::width), using `ui.available_width()`. Falls back
+    /// to the natural size when that is not finite.
+    pub fn fill_width(mut self) -> Self {
+        self.width = Width::Fill;
         self
     }
 
@@ -317,6 +357,7 @@ impl Widget for ToggleGroup<'_> {
             cells,
             orientation,
             equal_size,
+            width,
             highlight_active,
             exclusive,
             require_one,
@@ -347,12 +388,21 @@ impl Widget for ToggleGroup<'_> {
         let content: Vec<Vec2> = offs
             .iter()
             .zip(&ons)
-            .map(|(a, b)| a.size(ui).max(b.size(ui)) + pad * 2.0)
+            .map(|(a, b)| {
+                // `cell()` shares one Rc between both states: measure once.
+                let size = if Rc::ptr_eq(a, b) {
+                    a.size(ui)
+                } else {
+                    a.size(ui).max(b.size(ui))
+                };
+                size + pad * 2.0
+            })
             .collect();
         let min = ui.spacing().interact_size;
         let max_w = content.iter().map(|s| s.x).fold(min.x, f32::max);
         let max_h = content.iter().map(|s| s.y).fold(min.y, f32::max);
-        let (cross, mains): (f32, Vec<f32>) = match orientation {
+        let target = width.resolve(ui.available_width());
+        let (cross, mut mains): (f32, Vec<f32>) = match orientation {
             Orientation::Horizontal => (
                 max_h,
                 content
@@ -360,14 +410,24 @@ impl Widget for ToggleGroup<'_> {
                     .map(|s| if equal_size { max_w } else { s.x.max(min.x) })
                     .collect(),
             ),
-            Orientation::Vertical => (max_w, vec![max_h; n]),
+            Orientation::Vertical => (target.unwrap_or(max_w), vec![max_h; n]),
         };
+        if let (Some(target), Orientation::Horizontal) = (target, orientation) {
+            mains = distribute(&mains, target, (pad.x * 2.0).max(4.0));
+        }
         let total_main: f32 = mains.iter().sum();
         let total = match orientation {
             Orientation::Horizontal => vec2(total_main, cross),
             Orientation::Vertical => vec2(cross, total_main),
         };
         let (group_rect, mut response) = ui.allocate_exact_size(total, Sense::hover());
+        let frame_nr = ui.ctx().cumulative_frame_nr();
+        if !ui.is_rect_visible(group_rect) {
+            // Scrolled out of view: space is allocated, but there is nothing
+            // to interact with or paint. Drop any gesture so it can't resume.
+            ui.data_mut(|d| d.remove::<Gesture>(id));
+            return response;
+        }
         let rects = layout_cells(group_rect.min, &mains, cross, orientation);
         let responses: Vec<Response> = rects
             .iter()
@@ -398,7 +458,11 @@ impl Widget for ToggleGroup<'_> {
             )
         });
         let extending = held(modifiers, extend);
-        let mut gesture: Option<Gesture> = ui.data(|d| d.get_temp(id));
+        // A gesture not touched last frame belongs to an earlier showing of
+        // this group (hidden or culled mid-drag): discard it.
+        let mut gesture: Option<Gesture> = ui
+            .data(|d| d.get_temp::<Gesture>(id))
+            .filter(|g| g.frame.saturating_add(1) >= frame_nr);
         let was_active = gesture.is_some();
         let mut began = false;
         let mut changed = false;
@@ -423,7 +487,11 @@ impl Widget for ToggleGroup<'_> {
                 changed |= c;
                 mode
             };
-            gesture = Some(Gesture { mode, last: i });
+            gesture = Some(Gesture {
+                mode,
+                last: i,
+                frame: frame_nr,
+            });
             began = true;
         }
         // With `settle_press`: decide what kind of press it was, a frame later.
@@ -479,7 +547,11 @@ impl Widget for ToggleGroup<'_> {
                             g.mode = Mode::Paint(target);
                         }
                         g.last = idx;
-                    } else if exclusive && pos.distance(origin) <= max_dist {
+                    } else if pos.distance(origin) > max_dist {
+                        // Wandered off within the same cell (a scroll, say):
+                        // neither a tap nor a long press any more.
+                        g.mode = Mode::Inert;
+                    } else if exclusive {
                         if now - start >= long_press {
                             let (c, mode) = extend_press(&mut values, g.last, require_one);
                             changed |= c;
@@ -498,9 +570,18 @@ impl Widget for ToggleGroup<'_> {
         if !down {
             // A touch released without moving or waiting is a tap.
             if let Some(Gesture {
-                mode: Mode::Pending { .. },
+                mode: Mode::Pending { pos: origin, .. },
                 last,
+                ..
             }) = gesture
+                // The release frame can carry the whole movement, with no
+                // `down` frame to notice it in.
+                && !ui.input(|i| {
+                    i.events.iter().any(|e| {
+                        matches!(e, egui::Event::Touch { pos, .. } if pos.distance(origin) > max_dist)
+                    })
+                })
+                && pointer.is_none_or(|p| p.distance(origin) <= max_dist)
             {
                 changed |= if exclusive {
                     plain_press(&mut values, last, require_one).0
@@ -524,7 +605,13 @@ impl Widget for ToggleGroup<'_> {
 
         ui.data_mut(|d| match gesture {
             Some(g) => {
-                d.insert_temp(id, g);
+                d.insert_temp(
+                    id,
+                    Gesture {
+                        frame: frame_nr,
+                        ..g
+                    },
+                );
             }
             None => {
                 d.remove::<Gesture>(id);
@@ -535,11 +622,14 @@ impl Widget for ToggleGroup<'_> {
         for (i, r) in responses.iter().enumerate() {
             let on = *values[i];
             let shown = if on { &ons[i] } else { &offs[i] };
-            let label = tooltips[i]
-                .clone()
-                .or_else(|| shown.accessible_label())
-                .unwrap_or_default();
-            r.widget_info(|| WidgetInfo::selected(WidgetType::Button, true, on, label.clone()));
+            let enabled = ui.is_enabled();
+            r.widget_info(|| {
+                let label = tooltips[i]
+                    .clone()
+                    .or_else(|| shown.accessible_label())
+                    .unwrap_or_default();
+                WidgetInfo::selected(WidgetType::Button, enabled, on, label)
+            });
             if r.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                 if let Some(text) = &tooltips[i] {
@@ -574,6 +664,17 @@ impl Widget for ToggleGroup<'_> {
             };
             let shown = if on { &ons[i] } else { &offs[i] };
             shown.paint(ui, rects[i], color);
+        }
+        // Keyboard focus ring, following each cell's own corner rounding.
+        for (i, r) in responses.iter().enumerate() {
+            if r.has_focus() {
+                ui.painter().add(Shape::rect_stroke(
+                    rects[i],
+                    corner_radius_for(i, n, orientation, st.radius),
+                    ui.visuals().selection.stroke,
+                    egui::StrokeKind::Inside,
+                ));
+            }
         }
 
         if changed {
