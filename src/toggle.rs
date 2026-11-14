@@ -5,7 +5,10 @@
 use std::hash::Hash;
 use std::rc::Rc;
 
-use egui::{Color32, Id, Response, Sense, Shape, Ui, Vec2, Widget, WidgetInfo, WidgetType, vec2};
+use egui::{
+    Color32, Id, Modifiers, Pos2, Response, Sense, Shape, Ui, Vec2, Widget, WidgetInfo, WidgetType,
+    vec2,
+};
 
 use crate::content::CellContent;
 use crate::geometry::{Orientation, index_at, layout_cells, range_between};
@@ -19,13 +22,78 @@ struct Cell<'a> {
     tooltip: Option<String>,
 }
 
-/// Drag-paint gesture in progress, kept in egui memory between frames.
+/// What the current pointer gesture does as it moves across cells.
 #[derive(Clone, Copy)]
-struct DragPaint {
-    /// The state every cell touched by this gesture is set to.
-    target: bool,
+enum Mode {
+    /// Set every cell touched to `target`.
+    Paint(bool),
+    /// Exclusive mode: the cell under the pointer becomes the only one on.
+    Move,
+    /// Touch in exclusive mode, not yet decided: a tap selects, a long press
+    /// extends, moving to another cell moves the selection.
+    Pending { start: f64, pos: Pos2 },
+    /// An extending press that changed nothing (it would have switched off
+    /// the last active cell); dragging does nothing.
+    Inert,
+}
+
+/// Pointer gesture in progress, kept in egui memory between frames.
+#[derive(Clone, Copy)]
+struct Gesture {
+    mode: Mode,
     /// Last cell index visited, so skipped cells can be filled in.
     last: usize,
+}
+
+fn count_on(values: &[&mut bool]) -> usize {
+    values.iter().filter(|v| ***v).count()
+}
+
+/// Set one cell, refusing to switch off the last active cell when
+/// `require_one` is set. Returns whether anything changed.
+fn set_cell(values: &mut [&mut bool], i: usize, target: bool, require_one: bool) -> bool {
+    if *values[i] == target || (!target && require_one && count_on(values) <= 1) {
+        return false;
+    }
+    *values[i] = target;
+    true
+}
+
+/// Make `i` the only active cell.
+fn select_only(values: &mut [&mut bool], i: usize) -> bool {
+    let mut changed = false;
+    for k in 0..values.len() {
+        changed |= set_cell(values, k, k == i, false);
+    }
+    changed
+}
+
+/// A plain (non-extending) press in exclusive mode. Pressing the only active
+/// cell switches it off unless `require_one` is set. Returns the change flag
+/// and the gesture mode to continue in.
+fn plain_press(values: &mut [&mut bool], i: usize, require_one: bool) -> (bool, Mode) {
+    let only = *values[i] && count_on(values) == 1;
+    if only {
+        (set_cell(values, i, false, require_one), Mode::Move)
+    } else {
+        (select_only(values, i), Mode::Move)
+    }
+}
+
+/// An extending press: flip `i`, leave the others, and paint from there.
+fn extend_press(values: &mut [&mut bool], i: usize, require_one: bool) -> (bool, Mode) {
+    let target = !*values[i];
+    let changed = set_cell(values, i, target, require_one);
+    (changed, if changed { Mode::Paint(target) } else { Mode::Inert })
+}
+
+/// Whether every modifier required by `want` is held in `have`.
+fn held(have: Modifiers, want: Modifiers) -> bool {
+    (!want.shift || have.shift)
+        && (!want.alt || have.alt)
+        && (!want.ctrl || have.ctrl)
+        && (!want.command || have.command)
+        && (!want.mac_cmd || have.mac_cmd)
 }
 
 /// Joined toggle buttons.
@@ -48,6 +116,11 @@ struct DragPaint {
 /// neighbours: each one is set to the state the first cell just took. Cells
 /// the pointer skips between frames are filled in too, and the drag keeps
 /// working when the pointer leaves the group sideways.
+///
+/// With [`exclusive`](ToggleGroup::exclusive), a plain press selects only the
+/// pressed cell. Holding the extend modifier (Shift by default) flips cells
+/// without touching the others, as in Blender. On a touch screen a tap
+/// selects and a long press extends.
 #[must_use = "Add with `ui.add(...)`."]
 pub struct ToggleGroup<'a> {
     id_salt: Id,
@@ -55,6 +128,9 @@ pub struct ToggleGroup<'a> {
     orientation: Orientation,
     equal_size: bool,
     highlight_active: bool,
+    exclusive: bool,
+    require_one: bool,
+    extend: Modifiers,
     style: GroupStyle,
 }
 
@@ -67,6 +143,9 @@ impl<'a> ToggleGroup<'a> {
             orientation: Orientation::Horizontal,
             equal_size: false,
             highlight_active: true,
+            exclusive: false,
+            require_one: false,
+            extend: Modifiers::SHIFT,
             style: GroupStyle::default(),
         }
     }
@@ -138,6 +217,33 @@ impl<'a> ToggleGroup<'a> {
         self
     }
 
+    /// Make the group exclusive, like Blender's toggle rows. A plain press
+    /// turns the other cells off; dragging moves the selection. Holding the
+    /// [extend modifier](Self::extend_modifier) (or long-pressing on touch)
+    /// flips the pressed cell and leaves the rest, so several can be on.
+    /// Pressing the only active cell switches it off, see
+    /// [`require_one`](Self::require_one). Default `false`.
+    pub fn exclusive(mut self, exclusive: bool) -> Self {
+        self.exclusive = exclusive;
+        self
+    }
+
+    /// In an exclusive group, never let the last active cell be switched
+    /// off, which makes it behave like radio buttons. Default `false`.
+    pub fn require_one(mut self, require_one: bool) -> Self {
+        self.require_one = require_one;
+        self
+    }
+
+    /// The modifier that makes a press extend instead of select in an
+    /// [exclusive](Self::exclusive) group. Default [`Modifiers::SHIFT`]; use
+    /// [`Modifiers::COMMAND`] for Cmd on macOS and Ctrl elsewhere. Does not
+    /// apply to touch, where a long press extends.
+    pub fn extend_modifier(mut self, modifier: Modifiers) -> Self {
+        self.extend = modifier;
+        self
+    }
+
     /// Stack the cells top to bottom instead of left to right.
     pub fn vertical(mut self) -> Self {
         self.orientation = Orientation::Vertical;
@@ -165,6 +271,9 @@ impl Widget for ToggleGroup<'_> {
             orientation,
             equal_size,
             highlight_active,
+            exclusive,
+            require_one,
+            extend,
             style,
         } = self;
         let n = cells.len();
@@ -219,59 +328,113 @@ impl Widget for ToggleGroup<'_> {
             .collect();
 
         // Interaction.
-        let (pressed, down, pointer) = ui.input(|i| {
+        let (pressed, down, pointer, modifiers, touch, now) = ui.input(|i| {
             (
                 i.pointer.primary_pressed(),
                 i.pointer.primary_down(),
                 i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()),
+                i.modifiers,
+                i.any_touches(),
+                i.time,
             )
         });
-        let mut paint: Option<DragPaint> = ui.data(|d| d.get_temp(id));
-        let was_painting = paint.is_some();
+        let (long_press, max_dist) = ui
+            .ctx()
+            .options(|o| (o.input_options.max_click_duration, o.input_options.max_click_dist));
+        let extending = held(modifiers, extend);
+        let mut gesture: Option<Gesture> = ui.data(|d| d.get_temp(id));
+        let was_active = gesture.is_some();
         let mut began = false;
         let mut changed = false;
-        let mut set = |values: &mut [&mut bool], i: usize, target: bool| {
-            if *values[i] != target {
-                *values[i] = target;
-                changed = true;
-            }
-        };
 
-        if paint.is_none() {
+        if gesture.is_none() {
             if pressed && let Some(i) = responses.iter().position(Response::hovered) {
-                let target = !*values[i];
-                set(&mut values, i, target);
-                paint = Some(DragPaint { target, last: i });
+                let mode = if !exclusive {
+                    let target = !*values[i];
+                    changed |= set_cell(&mut values, i, target, false);
+                    Mode::Paint(target)
+                } else if touch {
+                    Mode::Pending {
+                        start: now,
+                        pos: pointer.unwrap_or_else(|| rects[i].center()),
+                    }
+                } else {
+                    let (c, mode) = if extending {
+                        extend_press(&mut values, i, require_one)
+                    } else {
+                        plain_press(&mut values, i, require_one)
+                    };
+                    changed |= c;
+                    mode
+                };
+                gesture = Some(Gesture { mode, last: i });
                 began = true;
             }
-        } else if down && let (Some(p), Some(pos)) = (paint.as_mut(), pointer) {
+        } else if down && let (Some(g), Some(pos)) = (gesture.as_mut(), pointer) {
             let idx = index_at(&rects, pos, orientation);
-            for k in range_between(p.last, idx) {
-                set(&mut values, k, p.target);
+            match g.mode {
+                Mode::Paint(target) => {
+                    for k in range_between(g.last, idx) {
+                        changed |= set_cell(&mut values, k, target, exclusive && require_one);
+                    }
+                    g.last = idx;
+                }
+                Mode::Move => {
+                    if idx != g.last {
+                        changed |= select_only(&mut values, idx);
+                        g.last = idx;
+                    }
+                }
+                Mode::Pending { start, pos: origin } => {
+                    if idx != g.last {
+                        // Moved to another cell: a drag, not a tap.
+                        changed |= select_only(&mut values, idx);
+                        g.mode = Mode::Move;
+                        g.last = idx;
+                    } else if pos.distance(origin) <= max_dist && now - start >= long_press {
+                        let (c, mode) = extend_press(&mut values, g.last, require_one);
+                        changed |= c;
+                        g.mode = mode;
+                    }
+                }
+                Mode::Inert => {}
             }
-            p.last = idx;
         }
         if !down {
-            paint = None;
+            // A touch released without moving or waiting is a tap.
+            if let Some(Gesture {
+                mode: Mode::Pending { .. },
+                last,
+            }) = gesture
+            {
+                changed |= plain_press(&mut values, last, require_one).0;
+            }
+            gesture = None;
         }
 
         // Keyboard activation (Space / Enter on a focused cell). Pointer
         // presses are handled above, so skip clicks that belong to a gesture.
-        if !was_painting && !began {
+        if !was_active && !began {
             for (i, r) in responses.iter().enumerate() {
                 if r.clicked() {
-                    let target = !*values[i];
-                    set(&mut values, i, target);
+                    changed |= if !exclusive {
+                        let target = !*values[i];
+                        set_cell(&mut values, i, target, false)
+                    } else if extending {
+                        extend_press(&mut values, i, require_one).0
+                    } else {
+                        plain_press(&mut values, i, require_one).0
+                    };
                 }
             }
         }
 
-        ui.data_mut(|d| match paint {
-            Some(p) => {
-                d.insert_temp(id, p);
+        ui.data_mut(|d| match gesture {
+            Some(g) => {
+                d.insert_temp(id, g);
             }
             None => {
-                d.remove::<DragPaint>(id);
+                d.remove::<Gesture>(id);
             }
         });
 
@@ -293,8 +456,8 @@ impl Widget for ToggleGroup<'_> {
         }
 
         // Paint.
-        let hovered = paint
-            .map(|p| p.last)
+        let hovered = gesture
+            .map(|g| g.last)
             .or_else(|| responses.iter().position(Response::hovered));
         let fills: Vec<Color32> = (0..n)
             .map(|i| {

@@ -6,6 +6,7 @@ use egui_control_groups::{FieldGroup, GroupStyle, PaintCell, ToggleGroup};
 pub struct Demo {
     visibility: [bool; 4],
     axes: [bool; 3],
+    modes: [bool; 3],
     icons: [bool; 3],
     grid: bool,
     position: [f32; 3],
@@ -17,6 +18,7 @@ impl Default for Demo {
         Self {
             visibility: [true, false, true, false],
             axes: [true, false, false],
+            modes: [true, false, false],
             icons: [true, false, true],
             grid: false,
             position: [0.0, 1.5, -2.0],
@@ -39,6 +41,16 @@ impl Demo {
             ToggleGroup::new("axes")
                 .cells(["X", "Y", "Z"], &mut self.axes)
                 .equal_width(),
+        );
+
+        ui.add_space(16.0);
+        ui.heading("Exclusive");
+        ui.label("A press selects one. Hold Shift (long press on touch) to add more.");
+        ui.add(
+            ToggleGroup::new("modes")
+                .cells(["Vertex", "Edge", "Face"], &mut self.modes)
+                .equal_width()
+                .exclusive(true),
         );
 
         ui.add_space(16.0);
