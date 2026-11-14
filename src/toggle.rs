@@ -6,22 +6,84 @@ use std::hash::Hash;
 use std::rc::Rc;
 
 use egui::{
-    Color32, Id, Modifiers, Pos2, Response, Sense, Shape, Ui, Vec2, Widget, WidgetInfo, WidgetType,
-    vec2,
+    Color32, Id, Key, Modifiers, Popup, Pos2, Rect, Response, Sense, Shape, Stroke, TextStyle, Ui,
+    Vec2, Widget, WidgetInfo, WidgetType, pos2, vec2,
 };
 
 use crate::content::CellContent;
 use crate::geometry::corner_radius_for;
 use crate::geometry::{Orientation, index_at, layout_cells, range_between};
 use crate::paint::frame_shapes;
-use crate::style::GroupStyle;
+use crate::style::{GroupStyle, Resolved};
 use crate::width::{Width, distribute};
 
+/// The binding of a dropdown cell, with the value's type erased so that
+/// `ToggleGroup` itself needn't be generic.
+trait DropdownBinding<'a> {
+    /// Index of the option equal to the bound value, if any.
+    fn selected(&self) -> Option<usize>;
+    /// Contents of the options, in order.
+    fn options(&self) -> &[Rc<dyn CellContent + 'a>];
+    /// Make option `i` the bound value. Call at most once, and read nothing
+    /// else from the binding afterwards: it swaps the option's value into the
+    /// binding (so the value type needn't be `Clone`).
+    fn select(&mut self, i: usize);
+}
+
+struct Bound<'a, T> {
+    value: &'a mut T,
+    /// The option values (`values[i]` belongs to `contents[i]`).
+    values: Vec<T>,
+    contents: Vec<Rc<dyn CellContent + 'a>>,
+}
+
+impl<'a, T: PartialEq> DropdownBinding<'a> for Bound<'a, T> {
+    fn selected(&self) -> Option<usize> {
+        self.values.iter().position(|v| v == &*self.value)
+    }
+
+    fn options(&self) -> &[Rc<dyn CellContent + 'a>] {
+        &self.contents
+    }
+
+    fn select(&mut self, i: usize) {
+        std::mem::swap(self.value, &mut self.values[i]);
+    }
+}
+
+enum CellKind<'a> {
+    Toggle {
+        off: Rc<dyn CellContent + 'a>,
+        on: Rc<dyn CellContent + 'a>,
+        value: &'a mut bool,
+    },
+    Dropdown(Box<dyn DropdownBinding<'a> + 'a>),
+}
+
 struct Cell<'a> {
-    off: Rc<dyn CellContent + 'a>,
-    on: Rc<dyn CellContent + 'a>,
-    value: &'a mut bool,
+    kind: CellKind<'a>,
     tooltip: Option<String>,
+}
+
+/// What a cell shows, once the group is being drawn.
+enum Content<'a> {
+    Toggle {
+        off: Rc<dyn CellContent + 'a>,
+        on: Rc<dyn CellContent + 'a>,
+    },
+    Dropdown {
+        binding: Box<dyn DropdownBinding<'a> + 'a>,
+        /// The option matching the bound value, found before drawing.
+        selected: Option<usize>,
+    },
+}
+
+/// The state of every cell that is a toggle; `None` marks a dropdown cell,
+/// which is not a value and which every helper below leaves alone.
+type Values<'a> = [Option<&'a mut bool>];
+
+fn is_on(values: &Values, i: usize) -> bool {
+    matches!(values[i].as_deref(), Some(true))
 }
 
 /// What the current pointer gesture does as it moves across cells.
@@ -54,22 +116,30 @@ struct Gesture {
     frame: u64,
 }
 
-fn count_on(values: &[&mut bool]) -> usize {
-    values.iter().filter(|v| ***v).count()
+fn count_on(values: &Values) -> usize {
+    values
+        .iter()
+        .filter(|v| matches!(v.as_deref(), Some(true)))
+        .count()
 }
 
 /// Set one cell, refusing to switch off the last active cell when
 /// `require_one` is set. Returns whether anything changed.
-fn set_cell(values: &mut [&mut bool], i: usize, target: bool, require_one: bool) -> bool {
-    if *values[i] == target || (!target && require_one && count_on(values) <= 1) {
+fn set_cell(values: &mut Values, i: usize, target: bool, require_one: bool) -> bool {
+    if values[i].is_none() || is_on(values, i) == target {
         return false;
     }
-    *values[i] = target;
+    if !target && require_one && count_on(values) <= 1 {
+        return false;
+    }
+    if let Some(v) = values[i].as_deref_mut() {
+        *v = target;
+    }
     true
 }
 
 /// Make `i` the only active cell.
-fn select_only(values: &mut [&mut bool], i: usize) -> bool {
+fn select_only(values: &mut Values, i: usize) -> bool {
     let mut changed = false;
     for k in 0..values.len() {
         changed |= set_cell(values, k, k == i, false);
@@ -80,8 +150,8 @@ fn select_only(values: &mut [&mut bool], i: usize) -> bool {
 /// A plain (non-extending) press in exclusive mode. Pressing the only active
 /// cell switches it off unless `require_one` is set. Returns the change flag
 /// and the gesture mode to continue in.
-fn plain_press(values: &mut [&mut bool], i: usize, require_one: bool) -> (bool, Mode) {
-    let only = *values[i] && count_on(values) == 1;
+fn plain_press(values: &mut Values, i: usize, require_one: bool) -> (bool, Mode) {
+    let only = is_on(values, i) && count_on(values) == 1;
     if only {
         (set_cell(values, i, false, require_one), Mode::Move)
     } else {
@@ -90,8 +160,8 @@ fn plain_press(values: &mut [&mut bool], i: usize, require_one: bool) -> (bool, 
 }
 
 /// An extending press: flip `i`, leave the others, and paint from there.
-fn extend_press(values: &mut [&mut bool], i: usize, require_one: bool) -> (bool, Mode) {
-    let target = !*values[i];
+fn extend_press(values: &mut Values, i: usize, require_one: bool) -> (bool, Mode) {
+    let target = !is_on(values, i);
     let changed = set_cell(values, i, target, require_one);
     (
         changed,
@@ -105,14 +175,14 @@ fn extend_press(values: &mut [&mut bool], i: usize, require_one: bool) -> (bool,
 
 /// A press by a mouse (or the keyboard): acts at once.
 fn press(
-    values: &mut [&mut bool],
+    values: &mut Values,
     i: usize,
     exclusive: bool,
     extending: bool,
     require_one: bool,
 ) -> (bool, Mode) {
     if !exclusive {
-        let target = !*values[i];
+        let target = !is_on(values, i);
         (set_cell(values, i, target, false), Mode::Paint(target))
     } else if extending {
         extend_press(values, i, require_one)
@@ -154,6 +224,11 @@ fn held(have: Modifiers, want: Modifiers) -> bool {
 /// With [`exclusive`](ToggleGroup::exclusive), a plain press selects only the
 /// pressed cell. Holding the extend modifier (Shift by default) flips cells
 /// without touching the others, as in Blender.
+///
+/// A group can also hold [dropdown](ToggleGroup::dropdown) cells, which show
+/// the selected option of a list instead of an on / off state. They share the
+/// frame and look of the toggles but take no part in dragging or in
+/// `exclusive` selection.
 ///
 /// On a touch screen nothing happens at the moment of touch: a tap acts on
 /// release, dragging onto another cell starts a drag, and in an exclusive
@@ -198,13 +273,16 @@ impl<'a> ToggleGroup<'a> {
     ///
     /// `label` is anything implementing [`CellContent`]: a `&str`, `String`,
     /// `RichText`, an `egui::Image`, an [`Icon`](crate::Icon) or a
-    /// [`PaintCell`](crate::PaintCell).
+    /// [`PaintCell`](crate::PaintCell). A pair of those, such as
+    /// `(Icon::new(image), "Snap")`, shows both side by side.
     pub fn cell(mut self, label: impl CellContent + 'a, value: &'a mut bool) -> Self {
         let content: Rc<dyn CellContent + 'a> = Rc::new(label);
         self.cells.push(Cell {
-            off: content.clone(),
-            on: content,
-            value,
+            kind: CellKind::Toggle {
+                off: content.clone(),
+                on: content,
+                value,
+            },
             tooltip: None,
         });
         self
@@ -223,9 +301,67 @@ impl<'a> ToggleGroup<'a> {
         value: &'a mut bool,
     ) -> Self {
         self.cells.push(Cell {
-            off: Rc::new(off),
-            on: Rc::new(on),
-            value,
+            kind: CellKind::Toggle {
+                off: Rc::new(off),
+                on: Rc::new(on),
+                value,
+            },
+            tooltip: None,
+        });
+        self
+    }
+
+    /// Append a dropdown cell bound to `value`, with one option per
+    /// `(value, content)` pair.
+    ///
+    /// The closed cell shows the content of the selected option and a small
+    /// caret, and is as wide as the widest option, so choosing another never
+    /// shifts the layout. If `value` matches no option, only the caret shows.
+    /// Pressing the cell (or Space / Enter once it has focus) opens a list
+    /// below it, or above when there is no room; the response then reports
+    /// [`changed`](Response::changed) when a different option is chosen.
+    /// Escape or a click elsewhere closes the list unchanged. Within the list,
+    /// the arrow keys move between options and Enter chooses one.
+    ///
+    /// A dropdown has the look of the other cells and may sit anywhere in the
+    /// group, but it is not a toggle: dragging across it skips it,
+    /// [`exclusive`](Self::exclusive) and [`require_one`](Self::require_one)
+    /// ignore it, and a press on it only opens the list. Options are any
+    /// [`CellContent`], so a pair `(Icon, &str)` shows an icon and text.
+    /// [`tooltip`](Self::tooltip) applies to it as to any cell.
+    ///
+    /// ```no_run
+    /// # use egui_control_groups::ToggleGroup;
+    /// # egui::__run_test_ui(|ui| {
+    /// #[derive(PartialEq)]
+    /// enum SnapMode { Grid, Vertex }
+    /// let (mut snap, mut mode) = (true, SnapMode::Grid);
+    /// ui.add(
+    ///     ToggleGroup::new("snap")
+    ///         .cell("Snap", &mut snap)
+    ///         .dropdown(&mut mode, [(SnapMode::Grid, "Grid"), (SnapMode::Vertex, "Vertex")]),
+    /// );
+    /// # });
+    /// ```
+    pub fn dropdown<T, C>(
+        mut self,
+        value: &'a mut T,
+        options: impl IntoIterator<Item = (T, C)>,
+    ) -> Self
+    where
+        T: PartialEq + 'a,
+        C: CellContent + 'a,
+    {
+        let (values, contents) = options
+            .into_iter()
+            .map(|(v, c)| (v, Rc::new(c) as Rc<dyn CellContent + 'a>))
+            .unzip();
+        self.cells.push(Cell {
+            kind: CellKind::Dropdown(Box::new(Bound {
+                value,
+                values,
+                contents,
+            })),
             tooltip: None,
         });
         self
@@ -387,28 +523,43 @@ impl Widget for ToggleGroup<'_> {
         let st = style.resolve(ui);
         let id = ui.make_persistent_id(id_salt);
 
-        let mut offs = Vec::with_capacity(n);
-        let mut ons = Vec::with_capacity(n);
+        let mut contents = Vec::with_capacity(n);
         let mut tooltips = Vec::with_capacity(n);
-        let mut values = Vec::with_capacity(n);
+        let mut values: Vec<Option<&mut bool>> = Vec::with_capacity(n);
         for c in cells {
-            offs.push(c.off);
-            ons.push(c.on);
             tooltips.push(c.tooltip);
-            values.push(c.value);
+            match c.kind {
+                CellKind::Toggle { off, on, value } => {
+                    contents.push(Content::Toggle { off, on });
+                    values.push(Some(value));
+                }
+                CellKind::Dropdown(binding) => {
+                    let selected = binding.selected();
+                    contents.push(Content::Dropdown { binding, selected });
+                    values.push(None);
+                }
+            }
         }
+        let is_toggle: Vec<bool> = values.iter().map(Option::is_some).collect();
+        let (caret, caret_gap) = (caret_size(ui), ui.spacing().icon_spacing);
 
-        // Sizes: each cell fits the larger of its two states.
+        // Sizes: each cell fits the larger of its two states, or the widest
+        // option of a dropdown.
         let pad = st.padding;
-        let content: Vec<Vec2> = offs
+        let content: Vec<Vec2> = contents
             .iter()
-            .zip(&ons)
-            .map(|(a, b)| {
-                // `cell()` shares one Rc between both states: measure once.
-                let size = if Rc::ptr_eq(a, b) {
-                    a.size(ui)
-                } else {
-                    a.size(ui).max(b.size(ui))
+            .map(|c| {
+                let size = match c {
+                    // `cell()` shares one Rc between both states: measure once.
+                    Content::Toggle { off, on } if Rc::ptr_eq(off, on) => off.size(ui),
+                    Content::Toggle { off, on } => off.size(ui).max(on.size(ui)),
+                    Content::Dropdown { binding, .. } => {
+                        let widest = binding
+                            .options()
+                            .iter()
+                            .fold(Vec2::ZERO, |acc, o| acc.max(o.size(ui)));
+                        vec2(widest.x + caret_gap + caret.x, widest.y.max(caret.y))
+                    }
                 };
                 size + pad * 2.0
             })
@@ -445,7 +596,15 @@ impl Widget for ToggleGroup<'_> {
         let responses: Vec<Response> = rects
             .iter()
             .enumerate()
-            .map(|(i, r)| ui.interact(*r, id.with(i), Sense::click_and_drag()))
+            .map(|(i, r)| {
+                // A dropdown only ever clicks: it has no part in dragging.
+                let sense = if is_toggle[i] {
+                    Sense::click_and_drag()
+                } else {
+                    Sense::click()
+                };
+                ui.interact(*r, id.with(i), sense)
+            })
             .collect();
 
         // Interaction.
@@ -482,7 +641,10 @@ impl Widget for ToggleGroup<'_> {
 
         if gesture.is_none()
             && pressed
-            && let Some(i) = responses.iter().position(Response::hovered)
+            && let Some(i) = responses
+                .iter()
+                .enumerate()
+                .position(|(i, r)| is_toggle[i] && r.hovered())
         {
             let origin = pointer.unwrap_or_else(|| rects[i].center());
             let mode = if settle_press {
@@ -531,11 +693,16 @@ impl Widget for ToggleGroup<'_> {
             && down
             && let (Some(g), Some(pos)) = (gesture.as_mut(), pointer)
         {
-            let idx = index_at(&rects, pos, orientation);
+            let raw = index_at(&rects, pos, orientation);
+            // Over a dropdown the pointer is "still on" the last toggle.
+            let idx = if is_toggle[raw] { raw } else { g.last };
             match g.mode {
                 Mode::Undecided { .. } => {}
                 Mode::Paint(target) => {
-                    for k in range_between(g.last, idx) {
+                    // Fill up to the raw index, so cells beyond a dropdown at
+                    // the edge are reached too; dropdowns themselves are
+                    // skipped by `set_cell`.
+                    for k in range_between(g.last, raw) {
                         changed |= set_cell(&mut values, k, target, exclusive && require_one);
                     }
                     g.last = idx;
@@ -553,7 +720,7 @@ impl Widget for ToggleGroup<'_> {
                             changed |= select_only(&mut values, idx);
                             g.mode = Mode::Move;
                         } else {
-                            let target = !*values[g.last];
+                            let target = !is_on(&values, g.last);
                             for k in range_between(g.last, idx) {
                                 changed |= set_cell(&mut values, k, target, false);
                             }
@@ -599,7 +766,7 @@ impl Widget for ToggleGroup<'_> {
                 changed |= if exclusive {
                     plain_press(&mut values, last, require_one).0
                 } else {
-                    let target = !*values[last];
+                    let target = !is_on(&values, last);
                     set_cell(&mut values, last, target, false)
                 };
             }
@@ -610,7 +777,8 @@ impl Widget for ToggleGroup<'_> {
         // presses are handled above, so skip clicks that belong to a gesture.
         if !was_active && !began {
             for (i, r) in responses.iter().enumerate() {
-                if r.clicked() {
+                // A dropdown opens its list by itself, see `Popup::menu` below.
+                if is_toggle[i] && r.clicked() {
                     changed |= press(&mut values, i, exclusive, extending, require_one).0;
                 }
             }
@@ -632,29 +800,54 @@ impl Widget for ToggleGroup<'_> {
         });
 
         // Accessibility.
+        let popup_ids: Vec<Id> = responses.iter().map(Popup::default_response_id).collect();
+        let open: Vec<bool> = (0..n)
+            .map(|i| !is_toggle[i] && Popup::is_id_open(ui.ctx(), popup_ids[i]))
+            .collect();
         for (i, r) in responses.iter().enumerate() {
-            let on = *values[i];
-            let shown = if on { &ons[i] } else { &offs[i] };
             let enabled = ui.is_enabled();
-            r.widget_info(|| {
-                let label = tooltips[i]
-                    .clone()
-                    .or_else(|| shown.accessible_label())
-                    .unwrap_or_default();
-                WidgetInfo::selected(WidgetType::Button, enabled, on, label)
-            });
+            match &contents[i] {
+                Content::Toggle { off, on } => {
+                    let on_now = is_on(&values, i);
+                    let shown = if on_now { on } else { off };
+                    r.widget_info(|| {
+                        let label = tooltips[i]
+                            .clone()
+                            .or_else(|| shown.accessible_label())
+                            .unwrap_or_default();
+                        WidgetInfo::selected(WidgetType::Button, enabled, on_now, label)
+                    });
+                }
+                Content::Dropdown { binding, selected } => {
+                    r.widget_info(|| {
+                        let label = tooltips[i]
+                            .clone()
+                            .or_else(|| {
+                                selected.and_then(|s| binding.options()[s].accessible_label())
+                            })
+                            .unwrap_or_default();
+                        WidgetInfo::labeled(WidgetType::ComboBox, enabled, label)
+                    });
+                }
+            }
             if r.gained_focus() {
                 r.scroll_to_me(None);
             }
             if r.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                if let Some(text) = &tooltips[i] {
+                if let Some(text) = &tooltips[i]
+                    && !open[i]
+                {
                     r.clone().on_hover_text(text);
                 }
             }
         }
 
         if !visible {
+            // Off-screen: a list would be left hanging, so close it.
+            for i in (0..n).filter(|&i| open[i]) {
+                Popup::close_id(ui.ctx(), popup_ids[i]);
+            }
             if changed {
                 response.mark_changed();
             }
@@ -667,9 +860,9 @@ impl Widget for ToggleGroup<'_> {
             .or_else(|| responses.iter().position(Response::hovered));
         let fills: Vec<Color32> = (0..n)
             .map(|i| {
-                if highlight_active && *values[i] {
+                if highlight_active && is_on(&values, i) {
                     st.active_fill
-                } else if hovered == Some(i) {
+                } else if hovered == Some(i) || open[i] {
                     st.hover_fill
                 } else {
                     st.fill
@@ -682,15 +875,36 @@ impl Widget for ToggleGroup<'_> {
         // cells below their content can't spill into the neighbours.
         let outer_clip = ui.clip_rect();
         for i in 0..n {
-            let on = *values[i];
-            let color = if highlight_active && on {
-                st.active_text
-            } else {
-                st.text
-            };
-            let shown = if on { &ons[i] } else { &offs[i] };
             ui.set_clip_rect(outer_clip.intersect(rects[i]));
-            shown.paint(ui, rects[i], color);
+            match &contents[i] {
+                Content::Toggle { off, on } => {
+                    let on_now = is_on(&values, i);
+                    let color = if highlight_active && on_now {
+                        st.active_text
+                    } else {
+                        st.text
+                    };
+                    let shown = if on_now { on } else { off };
+                    shown.paint(ui, rects[i], color);
+                }
+                Content::Dropdown { binding, selected } => {
+                    // The caret sits at the right edge; the selected option
+                    // is centred in the room left of it.
+                    let inner = rects[i].shrink2(pad);
+                    let caret_rect = Rect::from_center_size(
+                        pos2(inner.right() - caret.x / 2.0, inner.center().y),
+                        caret,
+                    );
+                    if let Some(s) = *selected {
+                        let room = Rect::from_min_max(
+                            inner.min,
+                            pos2(caret_rect.left() - caret_gap, inner.max.y),
+                        );
+                        binding.options()[s].paint(ui, room, st.text);
+                    }
+                    paint_caret(ui, caret_rect, st.text);
+                }
+            }
         }
         ui.set_clip_rect(outer_clip);
         // Keyboard focus ring, following each cell's own corner rounding.
@@ -705,9 +919,123 @@ impl Widget for ToggleGroup<'_> {
             }
         }
 
+        // Dropdown lists.
+        for i in (0..n).filter(|&i| !is_toggle[i]) {
+            if let Content::Dropdown { binding, selected } = &mut contents[i]
+                && let Some(chosen) = show_list(ui, &responses[i], binding.as_ref(), *selected, &st)
+                && *selected != Some(chosen)
+            {
+                binding.select(chosen);
+                changed = true;
+            }
+        }
+
         if changed {
             response.mark_changed();
         }
         response
     }
+}
+
+/// Size of the caret painted in a dropdown cell.
+fn caret_size(ui: &Ui) -> Vec2 {
+    let h = ui.text_style_height(&TextStyle::Button);
+    vec2((h * 0.55).round(), (h * 0.3).round())
+}
+
+/// A small downward-pointing triangle filling `rect`.
+fn paint_caret(ui: &Ui, rect: Rect, color: Color32) {
+    ui.painter().add(Shape::convex_polygon(
+        vec![rect.left_top(), rect.right_top(), rect.center_bottom()],
+        color,
+        Stroke::NONE,
+    ));
+}
+
+/// Show the list of options of a dropdown whose cell is `r`, if it is open
+/// (the cell's own click toggles it). Returns the option that was chosen.
+fn show_list(
+    ui: &Ui,
+    r: &Response,
+    binding: &dyn DropdownBinding<'_>,
+    selected: Option<usize>,
+    st: &Resolved,
+) -> Option<usize> {
+    let popup_id = Popup::default_response_id(r);
+    let was_open = Popup::is_id_open(ui.ctx(), popup_id);
+    let escape = ui.input(|i| i.key_pressed(Key::Escape));
+    let options = binding.options();
+    let pad = st.padding;
+    let min_row_h = ui.spacing().interact_size.y;
+    let widest = options.iter().fold(0.0_f32, |w, o| w.max(o.size(ui).x));
+    let mut chosen = None;
+
+    Popup::menu(r)
+        .id(popup_id)
+        .width(r.rect.width())
+        .show(|ui| {
+            ui.set_min_width(r.rect.width().max(widest + pad.x * 2.0));
+            // Just opened: put the keyboard focus on the current option so the
+            // arrow keys move from there.
+            let fresh = !was_open;
+            for (k, option) in options.iter().enumerate() {
+                let size = option.size(ui);
+                let row_size = vec2(ui.available_width(), (size.y + pad.y * 2.0).max(min_row_h));
+                let (rect, row) = ui.allocate_exact_size(row_size, Sense::click());
+                row.widget_info(|| {
+                    WidgetInfo::selected(
+                        WidgetType::SelectableLabel,
+                        true,
+                        selected == Some(k),
+                        option.accessible_label().unwrap_or_default(),
+                    )
+                });
+                if fresh && selected.unwrap_or(0) == k {
+                    row.request_focus();
+                }
+                if ui.is_rect_visible(rect) {
+                    let visuals = ui.style().interact_selectable(&row, selected == Some(k));
+                    if selected == Some(k) {
+                        ui.painter()
+                            .rect_filled(rect, visuals.corner_radius, visuals.bg_fill);
+                    } else if row.hovered() || row.has_focus() {
+                        ui.painter().rect_filled(
+                            rect,
+                            visuals.corner_radius,
+                            ui.visuals().widgets.hovered.weak_bg_fill,
+                        );
+                    }
+                    if row.has_focus() {
+                        ui.painter().rect_stroke(
+                            rect,
+                            visuals.corner_radius,
+                            ui.visuals().selection.stroke,
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                    let color = if selected == Some(k) {
+                        ui.visuals().selection.stroke.color
+                    } else if row.hovered() {
+                        ui.visuals().widgets.hovered.text_color()
+                    } else {
+                        ui.visuals().widgets.inactive.text_color()
+                    };
+                    // Left-aligned, so icons in an icon-and-text list line up.
+                    let at = pos2(rect.left() + pad.x, rect.center().y - size.y / 2.0);
+                    option.paint(ui, Rect::from_min_size(at, size), color);
+                }
+                if row.clicked() {
+                    chosen = Some(k);
+                }
+            }
+        });
+
+    if chosen.is_some() {
+        Popup::close_id(ui.ctx(), popup_id);
+    }
+    if was_open && (chosen.is_some() || escape) {
+        // Closed by choosing or Escape: give the focus back to the cell.
+        r.request_focus();
+    }
+    chosen
 }

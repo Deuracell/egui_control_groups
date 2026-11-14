@@ -8,8 +8,14 @@ between cells.
   across the others to set them all to the same state. Cells can hold text,
   an `egui::Image` (via `Icon`), custom painting (`PaintCell`), or any type
   implementing `CellContent`. `.exclusive(true)` makes a press select only that
-  cell; Shift (a long press on touch) adds to the selection, as in Blender.
+  cell; Shift (a long press on touch) adds to the selection, as in Blender
+  (`.allow_extend(false)` turns that off). A pair such as `(icon, "Snap")`
+  shows an icon and text together. `.dropdown(&mut value, options)` adds a
+  cell that shows the chosen option and a caret, and opens a list.
   `.width(w)` or `.fill_width()` sets the width of the whole group.
+- **`RadioGroup`**: the same row bound to a single value, so exactly one
+  option is selected. `RadioGroup::optional` binds an `Option` instead, and
+  pressing the selected option clears it.
 - **`FieldGroup`**: a row or column of text or number fields. Click to edit
   one, or drag across several and type once to edit them all. Enter or
   clicking away commits; Escape cancels. Tab commits and opens the next
@@ -50,6 +56,25 @@ also fills the available width:
 let mut w = Number::new(&mut width).precision(1).range(0.0..=500.0).suffix(" px");
 let mut h = Number::new(&mut height).precision(1).range(0.0..=500.0).suffix(" px");
 ui.add(FieldGroup::new("size").labeled("W", &mut w).labeled("H", &mut h).fill_width());
+```
+
+A `RadioGroup` picks one value, and a `ToggleGroup` can end in a dropdown:
+
+```rust
+use egui_control_groups::RadioGroup;
+
+ui.add(
+    RadioGroup::new("mode", &mut mode)
+        .option(Mode::Vertex, "Vertex")
+        .option(Mode::Edge, "Edge")
+        .option(Mode::Face, "Face"),
+);
+
+ui.add(
+    ToggleGroup::new("snap")
+        .cell("Snap", &mut snap_on)
+        .dropdown(&mut snap_mode, [(SnapMode::Grid, "Grid"), (SnapMode::Vertex, "Vertex")]),
+);
 ```
 
 Cells can show a different icon per state, with the active fill turned off:

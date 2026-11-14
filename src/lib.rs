@@ -5,6 +5,9 @@
 //!
 //! * [`ToggleGroup`] is a row or column of toggle buttons. Press one and drag
 //!   across the others to set them all to the same state.
+//! * [`RadioGroup`] is a row or column of options bound to a single value, like
+//!   `selectable_value`: exactly one is selected, or with
+//!   [`RadioGroup::optional`] at most one.
 //! * [`FieldGroup`] is a row or column of text / number fields. Press in one
 //!   and drag across others to select several, then type once to edit them
 //!   together. Tab commits a field and opens the next (see [`TabBehavior`]
@@ -24,6 +27,7 @@ mod fields;
 mod geometry;
 mod number;
 mod paint;
+mod radio;
 mod style;
 mod toggle;
 mod width;
@@ -32,5 +36,6 @@ pub use content::{CellContent, Icon, PaintCell};
 pub use fields::{FieldGroup, FieldValue, TabBehavior};
 pub use geometry::Orientation;
 pub use number::{Number, NumberValue};
+pub use radio::RadioGroup;
 pub use style::GroupStyle;
 pub use toggle::ToggleGroup;
