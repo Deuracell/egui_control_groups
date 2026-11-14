@@ -49,6 +49,9 @@ struct Gesture {
     mode: Mode,
     /// Last cell index visited, so skipped cells can be filled in.
     last: usize,
+    /// Frame this was last updated in, to drop a gesture whose group stopped
+    /// being shown (and so never saw the release).
+    frame: u64,
 }
 
 fn count_on(values: &[&mut bool]) -> usize {
@@ -232,6 +235,14 @@ impl<'a> ToggleGroup<'a> {
         labels: impl IntoIterator<Item = L>,
         values: &'a mut [bool],
     ) -> Self {
+        let labels: Vec<L> = labels.into_iter().collect();
+        debug_assert_eq!(
+            labels.len(),
+            values.len(),
+            "ToggleGroup::cells: {} labels but {} values; the extra ones would be silently dropped",
+            labels.len(),
+            values.len()
+        );
         for (label, value) in labels.into_iter().zip(values.iter_mut()) {
             self = self.cell(label, value);
         }
@@ -377,7 +388,15 @@ impl Widget for ToggleGroup<'_> {
         let content: Vec<Vec2> = offs
             .iter()
             .zip(&ons)
-            .map(|(a, b)| a.size(ui).max(b.size(ui)) + pad * 2.0)
+            .map(|(a, b)| {
+                // `cell()` shares one Rc between both states: measure once.
+                let size = if Rc::ptr_eq(a, b) {
+                    a.size(ui)
+                } else {
+                    a.size(ui).max(b.size(ui))
+                };
+                size + pad * 2.0
+            })
             .collect();
         let min = ui.spacing().interact_size;
         let max_w = content.iter().map(|s| s.x).fold(min.x, f32::max);
@@ -402,6 +421,13 @@ impl Widget for ToggleGroup<'_> {
             Orientation::Vertical => vec2(cross, total_main),
         };
         let (group_rect, mut response) = ui.allocate_exact_size(total, Sense::hover());
+        let frame_nr = ui.ctx().cumulative_frame_nr();
+        if !ui.is_rect_visible(group_rect) {
+            // Scrolled out of view: space is allocated, but there is nothing
+            // to interact with or paint. Drop any gesture so it can't resume.
+            ui.data_mut(|d| d.remove::<Gesture>(id));
+            return response;
+        }
         let rects = layout_cells(group_rect.min, &mains, cross, orientation);
         let responses: Vec<Response> = rects
             .iter()
@@ -432,7 +458,11 @@ impl Widget for ToggleGroup<'_> {
             )
         });
         let extending = held(modifiers, extend);
-        let mut gesture: Option<Gesture> = ui.data(|d| d.get_temp(id));
+        // A gesture not touched last frame belongs to an earlier showing of
+        // this group (hidden or culled mid-drag): discard it.
+        let mut gesture: Option<Gesture> = ui
+            .data(|d| d.get_temp::<Gesture>(id))
+            .filter(|g| g.frame.saturating_add(1) >= frame_nr);
         let was_active = gesture.is_some();
         let mut began = false;
         let mut changed = false;
@@ -457,7 +487,11 @@ impl Widget for ToggleGroup<'_> {
                 changed |= c;
                 mode
             };
-            gesture = Some(Gesture { mode, last: i });
+            gesture = Some(Gesture {
+                mode,
+                last: i,
+                frame: frame_nr,
+            });
             began = true;
         }
         // With `settle_press`: decide what kind of press it was, a frame later.
@@ -538,6 +572,7 @@ impl Widget for ToggleGroup<'_> {
             if let Some(Gesture {
                 mode: Mode::Pending { pos: origin, .. },
                 last,
+                ..
             }) = gesture
                 // The release frame can carry the whole movement, with no
                 // `down` frame to notice it in.
@@ -570,7 +605,13 @@ impl Widget for ToggleGroup<'_> {
 
         ui.data_mut(|d| match gesture {
             Some(g) => {
-                d.insert_temp(id, g);
+                d.insert_temp(
+                    id,
+                    Gesture {
+                        frame: frame_nr,
+                        ..g
+                    },
+                );
             }
             None => {
                 d.remove::<Gesture>(id);
