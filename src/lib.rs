@@ -22,6 +22,6 @@ mod toggle;
 
 pub use content::{CellContent, Icon, PaintCell};
 pub use fields::{FieldGroup, FieldValue};
-pub use geometry::{Orientation, corner_radius_for, index_at, layout_cells, range_between};
+pub use geometry::Orientation;
 pub use style::GroupStyle;
 pub use toggle::ToggleGroup;

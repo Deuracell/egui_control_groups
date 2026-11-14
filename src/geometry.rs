@@ -3,7 +3,7 @@
 
 use std::ops::RangeInclusive;
 
-use egui::{CornerRadius, Pos2, Rect, Vec2, pos2, vec2};
+use egui::{CornerRadius, Pos2, Rect, Vec2, vec2};
 
 /// Which way the cells of a group are stacked.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -22,7 +22,7 @@ pub enum Orientation {
 /// first cell keeps its left corners and the last its right corners; in a
 /// vertical group the first keeps its top corners and the last its bottom
 /// corners. Every inner corner is square, so neighbours meet flush.
-pub fn corner_radius_for(
+pub(crate) fn corner_radius_for(
     index: usize,
     count: usize,
     orientation: Orientation,
@@ -60,7 +60,7 @@ pub fn corner_radius_for(
 ///
 /// `main_sizes` are the cell extents along the stacking axis and `cross` is
 /// the shared extent on the other axis.
-pub fn layout_cells(
+pub(crate) fn layout_cells(
     origin: Pos2,
     main_sizes: &[f32],
     cross: f32,
@@ -86,7 +86,7 @@ pub fn layout_cells(
 /// to the last cell, so a drag keeps working when the pointer drifts off the
 /// group sideways or overshoots its end. `cells` must be non-empty and laid
 /// out contiguously (as [`layout_cells`] does).
-pub fn index_at(cells: &[Rect], pos: Pos2, orientation: Orientation) -> usize {
+pub(crate) fn index_at(cells: &[Rect], pos: Pos2, orientation: Orientation) -> usize {
     let coord = match orientation {
         Orientation::Horizontal => pos.x,
         Orientation::Vertical => pos.y,
@@ -105,18 +105,14 @@ pub fn index_at(cells: &[Rect], pos: Pos2, orientation: Orientation) -> usize {
 
 /// Every index from `a` to `b` inclusive, whichever is larger. Used so a fast
 /// drag that skips cells between two frames still touches all of them.
-pub fn range_between(a: usize, b: usize) -> RangeInclusive<usize> {
+pub(crate) fn range_between(a: usize, b: usize) -> RangeInclusive<usize> {
     a.min(b)..=a.max(b)
-}
-
-#[allow(dead_code)]
-pub(crate) fn origin(rect: Rect) -> Pos2 {
-    pos2(rect.min.x, rect.min.y)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::pos2;
 
     fn r(nw: u8, ne: u8, sw: u8, se: u8) -> CornerRadius {
         CornerRadius { nw, ne, sw, se }
