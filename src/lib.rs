@@ -7,7 +7,13 @@
 //!   across the others to set them all to the same state.
 //! * [`FieldGroup`] is a row or column of text / number fields. Press in one
 //!   and drag across others to select several, then type once to edit them
-//!   together.
+//!   together. Tab commits a field and opens the next (see [`TabBehavior`]
+//!   for what happens at the ends). Wrap a value in [`Number`] to give it a
+//!   precision, range, prefix or suffix.
+//!
+//! Both widgets can be given a fixed width with `width` or stretched to the
+//! available space with [`ToggleGroup::fill_width`] / [`FieldGroup::fill_width`],
+//! and both work from the keyboard (Tab to a cell, Space or Enter to use it).
 //!
 //! The crate has no theme of its own. Colours, radius and padding come from
 //! the `egui::Style` of the `Ui` it is shown in; use [`GroupStyle`] to
