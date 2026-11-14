@@ -73,9 +73,9 @@ impl Demo {
                 .tooltip("Lock")
                 .state_cell("🙈", "👁", show)
                 .tooltip("Visible")
-                .state_cell("⊘", "🧲", snap)
+                .state_cell(square(false), square(true), snap)
                 .tooltip("Snap")
-                // Your own icons: any painter code works.
+                // Your own icons: any painter code works, and needs no font.
                 .state_cell(ring(false), ring(true), &mut self.grid)
                 .tooltip("Grid")
                 .highlight_active(false),
@@ -261,4 +261,21 @@ fn color_row(ui: &mut Ui, label: &str, value: &mut Option<Color32>, default: Col
         }
     });
     ui.end_row();
+}
+
+/// A custom-painted icon: a square outline, filled in when `filled`.
+fn square(filled: bool) -> PaintCell<impl Fn(&egui::Ui, egui::Rect, egui::Color32)> {
+    PaintCell::new(vec2(14.0, 14.0), move |ui, rect, color| {
+        let r = rect.shrink(1.0);
+        if filled {
+            ui.painter().rect_filled(r, 2.0, color);
+        } else {
+            ui.painter().rect_stroke(
+                r,
+                2.0,
+                egui::Stroke::new(1.5, color),
+                egui::StrokeKind::Inside,
+            );
+        }
+    })
 }
