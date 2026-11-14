@@ -7,6 +7,8 @@
 //! sized images and custom drawing, and you can implement [`CellContent`]
 //! for your own icon type.
 
+use std::borrow::Cow;
+
 use egui::{Color32, Image, Rect, RichText, TextStyle, Ui, Vec2, WidgetText};
 
 use crate::paint::make_galley;
@@ -62,6 +64,34 @@ text_content! {
     String => |s| WidgetText::from(s.clone()),
     WidgetText => |s| s.clone(),
     RichText => |s| WidgetText::from(s.clone()),
+    Cow<'_, str> => |s| WidgetText::from(s.as_ref()),
+}
+
+/// Borrowed content: covers `&String`, `&WidgetText`, `&Icon` and so on.
+/// (`&str` has its own impl above, since `str` is unsized.)
+impl<T: CellContent> CellContent for &T {
+    fn size(&self, ui: &Ui) -> Vec2 {
+        (**self).size(ui)
+    }
+    fn paint(&self, ui: &Ui, rect: Rect, color: Color32) {
+        (**self).paint(ui, rect, color);
+    }
+    fn accessible_label(&self) -> Option<String> {
+        (**self).accessible_label()
+    }
+}
+
+/// Boxed content, including `Box<dyn CellContent>` for mixed collections.
+impl<T: CellContent + ?Sized> CellContent for Box<T> {
+    fn size(&self, ui: &Ui) -> Vec2 {
+        (**self).size(ui)
+    }
+    fn paint(&self, ui: &Ui, rect: Rect, color: Color32) {
+        (**self).paint(ui, rect, color);
+    }
+    fn accessible_label(&self) -> Option<String> {
+        (**self).accessible_label()
+    }
 }
 
 /// An image shown as an icon, tinted to the cell's foreground colour.
