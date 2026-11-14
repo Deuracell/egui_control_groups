@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use egui::epaint::StrokeKind;
 use egui::{
-    Color32, CornerRadius, Galley, Pos2, Rect, Shape, TextStyle, TextWrapMode, Ui, WidgetText,
+    Color32, CornerRadius, Galley, Pos2, Rect, Shape, TextStyle, TextWrapMode, Ui, WidgetText, vec2,
 };
 
 use crate::geometry::{Orientation, corner_radius_for};
@@ -33,11 +33,22 @@ pub(crate) fn frame_shapes(
         let cr = corner_radius_for(i, n, orientation, style.radius);
         shapes.push(Shape::rect_filled(*cell, cr, *fill));
     }
+    // The outline is drawn inside the group's edge and snapped to the pixel
+    // grid differently from a loose line, so a divider running all the way to
+    // the edge can poke out past it. End dividers halfway into the outline's
+    // stroke instead, where the outline covers them.
+    let inset = style.outline.width / 2.0;
     for pair in cells.windows(2) {
         let a = pair[0];
         let points = match orientation {
-            Orientation::Horizontal => [a.right_top(), a.right_bottom()],
-            Orientation::Vertical => [a.left_bottom(), a.right_bottom()],
+            Orientation::Horizontal => [
+                a.right_top() + vec2(0.0, inset),
+                a.right_bottom() - vec2(0.0, inset),
+            ],
+            Orientation::Vertical => [
+                a.left_bottom() + vec2(inset, 0.0),
+                a.right_bottom() - vec2(inset, 0.0),
+            ],
         };
         shapes.push(Shape::line_segment(points, style.divider));
     }
