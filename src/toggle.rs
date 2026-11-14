@@ -25,6 +25,10 @@ struct Cell<'a> {
 /// What the current pointer gesture does as it moves across cells.
 #[derive(Clone, Copy)]
 enum Mode {
+    /// Just pressed. A finger and a mouse look the same on the press frame
+    /// (on the web the pointer event is handled before the touch event), so
+    /// the widget waits one frame to see which it is.
+    Undecided { start: f64, pos: Pos2 },
     /// Set every cell touched to `target`.
     Paint(bool),
     /// Exclusive mode: the cell under the pointer becomes the only one on.
@@ -92,6 +96,24 @@ fn extend_press(values: &mut [&mut bool], i: usize, require_one: bool) -> (bool,
             Mode::Inert
         },
     )
+}
+
+/// A press by a mouse (or the keyboard): acts at once.
+fn press(
+    values: &mut [&mut bool],
+    i: usize,
+    exclusive: bool,
+    extending: bool,
+    require_one: bool,
+) -> (bool, Mode) {
+    if !exclusive {
+        let target = !*values[i];
+        (set_cell(values, i, target, false), Mode::Paint(target))
+    } else if extending {
+        extend_press(values, i, require_one)
+    } else {
+        plain_press(values, i, require_one)
+    }
 }
 
 /// Whether every modifier required by `want` is held in `have`.
@@ -365,34 +387,46 @@ impl Widget for ToggleGroup<'_> {
         let mut began = false;
         let mut changed = false;
 
-        if gesture.is_none() {
-            if pressed && let Some(i) = responses.iter().position(Response::hovered) {
-                let mode = if touch {
-                    // Fingers can't hover and may be starting a scroll, so
-                    // nothing happens until release, a drag or a long press.
-                    Mode::Pending {
-                        start: now,
-                        pos: pointer.unwrap_or_else(|| rects[i].center()),
-                    }
-                } else if !exclusive {
-                    let target = !*values[i];
-                    changed |= set_cell(&mut values, i, target, false);
-                    Mode::Paint(target)
-                } else {
-                    let (c, mode) = if extending {
-                        extend_press(&mut values, i, require_one)
-                    } else {
-                        plain_press(&mut values, i, require_one)
-                    };
-                    changed |= c;
-                    mode
-                };
-                gesture = Some(Gesture { mode, last: i });
-                began = true;
+        if gesture.is_none()
+            && pressed
+            && let Some(i) = responses.iter().position(Response::hovered)
+        {
+            gesture = Some(Gesture {
+                mode: Mode::Undecided {
+                    start: now,
+                    pos: pointer.unwrap_or_else(|| rects[i].center()),
+                },
+                last: i,
+            });
+            began = true;
+        }
+        // Decide what kind of press it was, one frame after it happened.
+        if let Some(g) = gesture.as_mut()
+            && let Mode::Undecided { start, pos } = g.mode
+            && (!began || !down)
+        {
+            if touch {
+                // Fingers can't hover and may be starting a scroll, so
+                // nothing happens until release, a drag or a long press.
+                g.mode = Mode::Pending { start, pos };
+            } else {
+                let (c, mode) = press(&mut values, g.last, exclusive, extending, require_one);
+                changed |= c;
+                g.mode = mode;
             }
-        } else if down && let (Some(g), Some(pos)) = (gesture.as_mut(), pointer) {
+        }
+        if let Some(g) = gesture.as_mut()
+            && matches!(g.mode, Mode::Undecided { .. })
+        {
+            ui.ctx().request_repaint();
+        }
+        if !began
+            && down
+            && let (Some(g), Some(pos)) = (gesture.as_mut(), pointer)
+        {
             let idx = index_at(&rects, pos, orientation);
             match g.mode {
+                Mode::Undecided { .. } => {}
                 Mode::Paint(target) => {
                     for k in range_between(g.last, idx) {
                         changed |= set_cell(&mut values, k, target, exclusive && require_one);
@@ -457,14 +491,7 @@ impl Widget for ToggleGroup<'_> {
         if !was_active && !began {
             for (i, r) in responses.iter().enumerate() {
                 if r.clicked() {
-                    changed |= if !exclusive {
-                        let target = !*values[i];
-                        set_cell(&mut values, i, target, false)
-                    } else if extending {
-                        extend_press(&mut values, i, require_one).0
-                    } else {
-                        plain_press(&mut values, i, require_one).0
-                    };
+                    changed |= press(&mut values, i, exclusive, extending, require_one).0;
                 }
             }
         }
