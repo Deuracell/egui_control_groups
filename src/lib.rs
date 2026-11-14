@@ -19,6 +19,7 @@ mod geometry;
 mod paint;
 mod style;
 mod toggle;
+mod width;
 
 pub use content::{CellContent, Icon, PaintCell};
 pub use fields::{FieldGroup, FieldValue};

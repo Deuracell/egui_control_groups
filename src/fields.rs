@@ -13,6 +13,7 @@ use egui::{
 use crate::geometry::{Orientation, corner_radius_for, index_at, layout_cells};
 use crate::paint::{centered_galley, frame_shapes, make_galley};
 use crate::style::GroupStyle;
+use crate::width::{Width, distribute};
 
 /// A value a [`FieldGroup`] can edit as text.
 ///
@@ -168,6 +169,7 @@ pub struct FieldGroup<'a> {
     entries: Vec<Entry<'a>>,
     orientation: Orientation,
     cell_width: Option<f32>,
+    width: Width,
     style: GroupStyle,
 }
 
@@ -179,6 +181,7 @@ impl<'a> FieldGroup<'a> {
             entries: Vec::new(),
             orientation: Orientation::Horizontal,
             cell_width: None,
+            width: Width::Auto,
             style: GroupStyle::default(),
         }
     }
@@ -205,8 +208,30 @@ impl<'a> FieldGroup<'a> {
     }
 
     /// Width of every field. Defaults to half of `Spacing::text_edit_width`.
+    ///
+    /// This sets the natural size only: an explicit [`width`](Self::width) or
+    /// [`fill_width`](Self::fill_width) takes precedence over it.
     pub fn cell_width(mut self, width: f32) -> Self {
         self.cell_width = Some(width);
+        self
+    }
+
+    /// Make the whole group exactly `width` points wide.
+    ///
+    /// Horizontal groups share it between the fields in proportion to their
+    /// natural width (equal, so each gets an equal share); vertical groups
+    /// get it as their cross-axis width. Takes precedence over
+    /// [`cell_width`](Self::cell_width). A non-finite or negative value is
+    /// ignored. Default: natural size.
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = Width::Fixed(width);
+        self
+    }
+
+    /// Like [`width`](Self::width), using `ui.available_width()`. Falls back
+    /// to the natural size when that is not finite.
+    pub fn fill_width(mut self) -> Self {
+        self.width = Width::Fill;
         self
     }
 
@@ -224,6 +249,7 @@ impl Widget for FieldGroup<'_> {
             mut entries,
             orientation,
             cell_width,
+            width,
             style,
         } = self;
         let n = entries.len();
@@ -235,15 +261,26 @@ impl Widget for FieldGroup<'_> {
         let font = TextStyle::Button;
         let text_h = ui.text_style_height(&font);
 
-        let cell_w = cell_width.unwrap_or(ui.spacing().text_edit_width * 0.5);
+        let mut cell_w = cell_width.unwrap_or(ui.spacing().text_edit_width * 0.5);
+        let target = width.resolve(ui.available_width());
         let cell_h = ui
             .spacing()
             .interact_size
             .y
             .max(text_h + st.padding.y * 2.0);
         let (mains, cross, total) = match orientation {
-            Orientation::Horizontal => (vec![cell_w; n], cell_h, vec2(cell_w * n as f32, cell_h)),
-            Orientation::Vertical => (vec![cell_h; n], cell_w, vec2(cell_w, cell_h * n as f32)),
+            Orientation::Horizontal => {
+                let mains = match target {
+                    Some(t) => distribute(&vec![cell_w; n], t, (st.padding.x * 2.0).max(4.0)),
+                    None => vec![cell_w; n],
+                };
+                let w = mains.iter().sum::<f32>();
+                (mains, cell_h, vec2(w, cell_h))
+            }
+            Orientation::Vertical => {
+                cell_w = target.unwrap_or(cell_w);
+                (vec![cell_h; n], cell_w, vec2(cell_w, cell_h * n as f32))
+            }
         };
         let (group_rect, mut response) = ui.allocate_exact_size(total, Sense::hover());
         let cells = layout_cells(group_rect.min, &mains, cross, orientation);
