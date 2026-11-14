@@ -15,6 +15,16 @@ between cells.
 Colours, radius and padding come from the current `egui::Style`; use
 `GroupStyle` to override them.
 
+Release tags mirror the egui version they target: the minor version tracks egui (`0.36.x` targets egui 0.36).
+
+> **Until 1.0, patch releases may contain breaking changes**: the minor version is reserved for the egui version. Read the commit log or release notes before moving to a newer tag. Since the crate is pinned by git tag, nothing updates without you changing the tag.
+
+| Tag | egui / eframe |
+|---|---|
+| `v0.36.0` | 0.36 |
+
+A tag is a fixed snapshot: it never moves. `main` targets the newest egui and may be ahead of the latest tag, with unreleased and possibly breaking changes, so depend on a tag rather than on `main`.
+
 ```rust
 use egui_control_groups::{FieldGroup, ToggleGroup};
 
