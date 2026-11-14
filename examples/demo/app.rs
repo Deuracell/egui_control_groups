@@ -12,6 +12,7 @@ pub struct Demo {
     grid: bool,
     position: [f32; 3],
     name: [String; 2],
+    panel_width: f32,
 }
 
 impl Default for Demo {
@@ -25,6 +26,7 @@ impl Default for Demo {
             grid: false,
             position: [0.0, 1.5, -2.0],
             name: [String::from("Part"), String::from("A")],
+            panel_width: 360.0,
         }
     }
 }
@@ -115,6 +117,39 @@ impl Demo {
                 .cell_width(110.0),
         );
         ui.label(format!("position = {:?}", self.position));
+
+        ui.add_space(16.0);
+        ui.heading("Width");
+        ui.label("`fill_width` follows the space available; `width` is fixed.");
+        ui.add(egui::Slider::new(&mut self.panel_width, 160.0..=600.0).text("Panel width"));
+        ui.scope(|ui| {
+            ui.set_max_width(self.panel_width);
+            ui.add(
+                ToggleGroup::new("fill_toggles")
+                    .style(style.clone())
+                    .cells(["X", "Y", "Z"], &mut self.axes)
+                    .fill_width(),
+            );
+            ui.add_space(8.0);
+            let [x, y, z] = &mut self.position;
+            ui.add(
+                FieldGroup::new("fill_fields")
+                    .style(style.clone())
+                    .labeled("X", x)
+                    .labeled("Y", y)
+                    .labeled("Z", z)
+                    .fill_width(),
+            );
+        });
+        ui.add_space(8.0);
+        let [a, b] = &mut self.name;
+        ui.add(
+            FieldGroup::new("fixed_name")
+                .style(style.clone())
+                .field(a)
+                .field(b)
+                .width(200.0),
+        );
     }
 }
 
