@@ -630,6 +630,8 @@ fn user_defined_content_sizes_the_cell_and_drag_paints() {
 struct Exclusive {
     t: Toggles,
     require_one: bool,
+    exclusive: bool,
+    settle: bool,
 }
 
 impl Exclusive {
@@ -637,6 +639,8 @@ impl Exclusive {
         Self {
             t: Toggles::new(v),
             require_one: false,
+            exclusive: true,
+            settle: false,
         }
     }
 
@@ -645,8 +649,9 @@ impl Exclusive {
         let g = ToggleGroup::new("t")
             .cells(["A", "B", "C", "D"].into_iter().take(n), &mut self.t.v)
             .equal_width()
-            .exclusive(true)
-            .require_one(self.require_one);
+            .exclusive(self.exclusive)
+            .require_one(self.require_one)
+            .settle_press(self.settle);
         self.t.rect = ui.add(g).rect;
     }
 }
@@ -869,4 +874,106 @@ fn touch_drag_paints_in_plain_groups() {
     ev.extend(button(end, false));
     h.frame(ev, |ui| t.show(ui));
     assert_eq!(t.v, [true; 4]);
+}
+
+#[test]
+fn web_touch_order_does_not_act_on_the_press_frame() {
+    // On the web the pointer press is handled in a frame of its own, and the
+    // touch event only arrives in the next one.
+    for exclusive_group in [false, true] {
+        let (mut h, mut e) = exclusive(vec![false, false, false]);
+        e.exclusive = exclusive_group;
+        e.settle = true;
+        let p = e.t.center(1);
+        h.frame(button(p, true), |ui| e.show(ui));
+        h.frame(vec![touch(p, egui::TouchPhase::Start)], |ui| e.show(ui));
+        h.time += 0.1;
+        h.idle(|ui| e.show(ui));
+        assert_eq!(e.t.v, [false; 3], "acted before release");
+        let mut ev = button(p, false);
+        ev.push(touch(p, egui::TouchPhase::End));
+        h.frame(ev, |ui| e.show(ui));
+        h.idle(|ui| e.show(ui));
+        assert_eq!(e.t.v, [false, true, false]);
+    }
+}
+
+#[test]
+fn mouse_press_acts_on_the_press_frame_by_default() {
+    let (mut h, mut t) = (Harness::new(), Toggles::new(vec![false; 3]));
+    warm(&mut h, &mut t);
+    let p = t.center(1);
+    h.moved(p, |ui| t.show(ui));
+    h.press(p, |ui| t.show(ui));
+    assert_eq!(t.v, [false, true, false]);
+}
+
+#[test]
+fn settled_mouse_press_takes_effect_on_the_next_frame() {
+    let (mut h, mut e) = exclusive(vec![false; 3]);
+    e.exclusive = false;
+    e.settle = true;
+    let p = e.t.center(1);
+    h.moved(p, |ui| e.show(ui));
+    h.press(p, |ui| e.show(ui));
+    assert_eq!(e.t.v, [false; 3]);
+    h.idle(|ui| e.show(ui));
+    assert_eq!(e.t.v, [false, true, false]);
+}
+
+// ------------------------------------------------------------ touch fields
+
+/// Tap on a field, the way a browser reports it: pointer press, then the
+/// touch event, then release.
+fn tap(h: &mut Harness, f: &mut Fields, p: Pos2) {
+    h.frame(button(p, true), |ui| f.show(ui));
+    h.frame(vec![touch(p, egui::TouchPhase::Start)], |ui| f.show(ui));
+    let mut ev = button(p, false);
+    ev.push(touch(p, egui::TouchPhase::End));
+    h.frame(ev, |ui| f.show(ui));
+    for _ in 0..3 {
+        h.idle(|ui| f.show(ui));
+    }
+}
+
+#[test]
+fn touch_tap_away_cancels_the_edit() {
+    let (mut h, mut f) = (Harness::new(), Fields::new());
+    fwarm(&mut h, &mut f);
+    let p = f.center(1);
+    tap(&mut h, &mut f, p);
+    h.type_text("42", |ui| f.show(ui));
+    tap(&mut h, &mut f, pos2(400.0, 400.0));
+    assert_eq!(f.v, [1.0, 2.0, 3.0]);
+    // The editor is gone: typing now changes nothing.
+    h.type_text("7", |ui| f.show(ui));
+    h.key(Key::Enter, |ui| f.show(ui));
+    h.idle(|ui| f.show(ui));
+    assert_eq!(f.v, [1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn touch_enter_commits() {
+    let (mut h, mut f) = (Harness::new(), Fields::new());
+    fwarm(&mut h, &mut f);
+    let p = f.center(1);
+    tap(&mut h, &mut f, p);
+    h.type_text("42", |ui| f.show(ui));
+    h.key(Key::Enter, |ui| f.show(ui));
+    h.idle(|ui| f.show(ui));
+    assert_eq!(f.v, [1.0, 42.0, 3.0]);
+}
+
+#[test]
+fn mouse_click_away_still_commits() {
+    let (mut h, mut f) = (Harness::new(), Fields::new());
+    fwarm(&mut h, &mut f);
+    gesture(&mut h, &mut f, 1, 1);
+    h.type_text("42", |ui| f.show(ui));
+    let away = pos2(400.0, 400.0);
+    h.moved(away, |ui| f.show(ui));
+    h.press(away, |ui| f.show(ui));
+    h.release(away, |ui| f.show(ui));
+    h.idle(|ui| f.show(ui));
+    assert_eq!(f.v, [1.0, 42.0, 3.0]);
 }
