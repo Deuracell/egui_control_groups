@@ -27,6 +27,8 @@ fn collect(shape: &Shape, out: &mut Painted) {
 struct Harness {
     ctx: Context,
     time: f64,
+    modifiers: Modifiers,
+    sent_modifiers: Modifiers,
     painted: Painted,
 }
 
@@ -35,12 +37,19 @@ impl Harness {
         Self {
             ctx: Context::default(),
             time: 0.0,
+            modifiers: Modifiers::NONE,
+            sent_modifiers: Modifiers::NONE,
             painted: Painted::default(),
         }
     }
 
     fn frame(&mut self, events: Vec<Event>, mut ui_fn: impl FnMut(&mut Ui)) {
         self.time += 1.0 / 60.0;
+        let mut events = events;
+        if self.modifiers != self.sent_modifiers {
+            events.insert(0, Event::ModifiersChanged(self.modifiers));
+            self.sent_modifiers = self.modifiers;
+        }
         let input = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(800.0, 600.0))),
             time: Some(self.time),
@@ -606,4 +615,206 @@ fn user_defined_content_sizes_the_cell_and_drag_paints() {
     h.release(end, |ui| show(ui, &mut v, &mut rect));
     assert_eq!(v, [true, true]);
     assert_eq!(rect, before);
+}
+
+// ------------------------------------------------------ exclusive toggles
+
+struct Exclusive {
+    t: Toggles,
+    require_one: bool,
+}
+
+impl Exclusive {
+    fn new(v: Vec<bool>) -> Self {
+        Self {
+            t: Toggles::new(v),
+            require_one: false,
+        }
+    }
+
+    fn show(&mut self, ui: &mut Ui) {
+        let n = self.t.v.len();
+        let g = ToggleGroup::new("t")
+            .cells(["A", "B", "C", "D"].into_iter().take(n), &mut self.t.v)
+            .equal_width()
+            .exclusive(true)
+            .require_one(self.require_one);
+        self.t.rect = ui.add(g).rect;
+    }
+}
+
+fn exclusive(v: Vec<bool>) -> (Harness, Exclusive) {
+    let (mut h, mut e) = (Harness::new(), Exclusive::new(v));
+    for _ in 0..3 {
+        h.idle(|ui| e.show(ui));
+    }
+    (h, e)
+}
+
+fn click(h: &mut Harness, e: &mut Exclusive, i: usize) {
+    let p = e.t.center(i);
+    h.moved(p, |ui| e.show(ui));
+    h.press(p, |ui| e.show(ui));
+    h.release(p, |ui| e.show(ui));
+    h.idle(|ui| e.show(ui));
+}
+
+#[test]
+fn exclusive_press_turns_siblings_off() {
+    let (mut h, mut e) = exclusive(vec![true, false, true, false]);
+    click(&mut h, &mut e, 1);
+    assert_eq!(e.t.v, [false, true, false, false]);
+}
+
+#[test]
+fn exclusive_press_on_only_active_turns_it_off() {
+    let (mut h, mut e) = exclusive(vec![false, true, false]);
+    click(&mut h, &mut e, 1);
+    assert_eq!(e.t.v, [false; 3]);
+}
+
+#[test]
+fn exclusive_require_one_keeps_the_last_cell_on() {
+    let (mut h, mut e) = exclusive(vec![false, true, false]);
+    e.require_one = true;
+    click(&mut h, &mut e, 1);
+    assert_eq!(e.t.v, [false, true, false]);
+    click(&mut h, &mut e, 2);
+    assert_eq!(e.t.v, [false, false, true]);
+}
+
+#[test]
+fn exclusive_plain_drag_moves_the_selection() {
+    let (mut h, mut e) = exclusive(vec![true, false, false, false]);
+    let start = e.t.center(0);
+    h.moved(start, |ui| e.show(ui));
+    h.press(start, |ui| e.show(ui));
+    for i in 1..4 {
+        h.moved(e.t.center(i), |ui| e.show(ui));
+    }
+    h.release(e.t.center(3), |ui| e.show(ui));
+    assert_eq!(e.t.v, [false, false, false, true]);
+}
+
+#[test]
+fn exclusive_shift_press_adds_without_clearing() {
+    let (mut h, mut e) = exclusive(vec![true, false, false, false]);
+    h.modifiers = Modifiers::SHIFT;
+    click(&mut h, &mut e, 2);
+    assert_eq!(e.t.v, [true, false, true, false]);
+    // Shift on an active cell switches just that one off.
+    click(&mut h, &mut e, 0);
+    assert_eq!(e.t.v, [false, false, true, false]);
+}
+
+#[test]
+fn exclusive_shift_drag_paints_additively() {
+    let (mut h, mut e) = exclusive(vec![false, false, false, true]);
+    h.modifiers = Modifiers::SHIFT;
+    let start = e.t.center(0);
+    h.moved(start, |ui| e.show(ui));
+    h.press(start, |ui| e.show(ui));
+    h.moved(e.t.center(1), |ui| e.show(ui));
+    h.release(e.t.center(1), |ui| e.show(ui));
+    assert_eq!(e.t.v, [true, true, false, true]);
+}
+
+#[test]
+fn exclusive_shift_cannot_remove_the_last_cell_with_require_one() {
+    let (mut h, mut e) = exclusive(vec![false, true, false]);
+    e.require_one = true;
+    h.modifiers = Modifiers::SHIFT;
+    click(&mut h, &mut e, 1);
+    assert_eq!(e.t.v, [false, true, false]);
+}
+
+#[test]
+fn exclusive_custom_extend_modifier() {
+    let (mut h, mut e) = (Harness::new(), vec![true, false, false]);
+    let rect = std::cell::Cell::new(Rect::NOTHING);
+    let show = |ui: &mut Ui, v: &mut Vec<bool>| {
+        let g = ToggleGroup::new("t")
+            .cells(["A", "B", "C"], v)
+            .equal_width()
+            .exclusive(true)
+            .extend_modifier(Modifiers::CTRL);
+        rect.set(ui.add(g).rect);
+    };
+    for _ in 0..3 {
+        h.idle(|ui| show(ui, &mut e));
+    }
+    let r = rect.get();
+    let p = pos2(r.right() - 5.0, r.center().y);
+    // Shift is not the extend modifier here, so this is a plain press.
+    h.modifiers = Modifiers::SHIFT;
+    h.moved(p, |ui| show(ui, &mut e));
+    h.press(p, |ui| show(ui, &mut e));
+    h.release(p, |ui| show(ui, &mut e));
+    assert_eq!(e, [false, false, true]);
+    h.modifiers = Modifiers::CTRL;
+    let q = pos2(r.left() + 5.0, r.center().y);
+    h.moved(q, |ui| show(ui, &mut e));
+    h.press(q, |ui| show(ui, &mut e));
+    h.release(q, |ui| show(ui, &mut e));
+    assert_eq!(e, [true, false, true]);
+}
+
+fn touch(pos: Pos2, phase: egui::TouchPhase) -> Event {
+    Event::Touch {
+        device_id: egui::TouchDeviceId(0),
+        id: egui::TouchId(0),
+        phase,
+        pos,
+        force: None,
+    }
+}
+
+fn touch_down(h: &mut Harness, e: &mut Exclusive, p: Pos2) {
+    let mut ev = vec![touch(p, egui::TouchPhase::Start)];
+    ev.extend(button(p, true));
+    h.frame(ev, |ui| e.show(ui));
+}
+
+fn touch_up(h: &mut Harness, e: &mut Exclusive, p: Pos2) {
+    let mut ev = vec![touch(p, egui::TouchPhase::End)];
+    ev.extend(button(p, false));
+    h.frame(ev, |ui| e.show(ui));
+}
+
+#[test]
+fn touch_tap_selects_exclusively() {
+    let (mut h, mut e) = exclusive(vec![true, false, true, false]);
+    let p = e.t.center(1);
+    touch_down(&mut h, &mut e, p);
+    // Nothing is decided until release.
+    assert_eq!(e.t.v, [true, false, true, false]);
+    touch_up(&mut h, &mut e, p);
+    h.idle(|ui| e.show(ui));
+    assert_eq!(e.t.v, [false, true, false, false]);
+}
+
+#[test]
+fn touch_long_press_extends() {
+    let (mut h, mut e) = exclusive(vec![true, false, false, false]);
+    let p = e.t.center(2);
+    touch_down(&mut h, &mut e, p);
+    h.time += 1.0;
+    h.frame(vec![touch(p, egui::TouchPhase::Move)], |ui| e.show(ui));
+    touch_up(&mut h, &mut e, p);
+    h.idle(|ui| e.show(ui));
+    assert_eq!(e.t.v, [true, false, true, false]);
+}
+
+#[test]
+fn touch_drag_moves_the_selection() {
+    let (mut h, mut e) = exclusive(vec![true, false, false, false]);
+    let start = e.t.center(0);
+    touch_down(&mut h, &mut e, start);
+    let p = e.t.center(2);
+    let mut ev = vec![touch(p, egui::TouchPhase::Move)];
+    ev.push(Event::PointerMoved(p));
+    h.frame(ev, |ui| e.show(ui));
+    touch_up(&mut h, &mut e, p);
+    h.idle(|ui| e.show(ui));
+    assert_eq!(e.t.v, [false, false, true, false]);
 }
