@@ -154,6 +154,10 @@ struct Edit {
     /// The session was started or used by touch. A touch screen has no
     /// Escape key, so tapping away cancels there and only Enter commits.
     touch: bool,
+    /// Opened from the keyboard (Enter / Space on a focused cell, or Tab), so
+    /// Enter or Escape hands focus back to the cell. A pointer-opened edit
+    /// leaves nothing focused, so the app's own shortcuts work again.
+    keyboard: bool,
 }
 
 /// Joined text or number fields with multi-edit.
@@ -237,15 +241,16 @@ impl<'a> FieldGroup<'a> {
         labels: impl IntoIterator<Item = impl Into<WidgetText>>,
         values: &'a mut [T],
     ) -> Self {
-        let labels: Vec<WidgetText> = labels.into_iter().map(Into::into).collect();
-        debug_assert_eq!(
-            labels.len(),
-            values.len(),
-            "FieldGroup::fields: labels and values must have the same length"
-        );
-        for (label, value) in labels.into_iter().zip(values.iter_mut()) {
+        const MISMATCH: &str = "FieldGroup::fields: labels and values must have the same length";
+        let mut labels = labels.into_iter();
+        for value in values.iter_mut() {
+            let Some(label) = labels.next() else {
+                debug_assert!(false, "{MISMATCH}");
+                break;
+            };
             self = self.labeled(label, value);
         }
+        debug_assert!(labels.next().is_none(), "{MISMATCH}");
         self
     }
 
@@ -339,14 +344,19 @@ impl Widget for FieldGroup<'_> {
         };
         let (group_rect, mut response) = ui.allocate_exact_size(total, Sense::hover());
 
+        let cells = layout_cells(group_rect.min, &mains, cross, orientation);
         let mut state: State = ui.data(|d| d.get_temp(id)).unwrap_or_default();
         // Out of view and nothing in progress: the space is allocated, but
-        // there is nothing to lay out, paint or interact with.
+        // there is nothing to lay out or paint. The cells are still
+        // registered so that Tab can reach them (and scroll them into view).
         if !ui.is_rect_visible(group_rect)
             && state.edit.is_none()
             && state.press.is_none()
             && !ui.memory(|m| (0..n).any(|i| m.has_focus(id.with(i))))
         {
+            for (i, r) in cells.iter().enumerate() {
+                ui.interact(*r, id.with(i), Sense::click_and_drag());
+            }
             // Keep the auto ids of later widgets as stable as while editing.
             ui.skip_ahead_auto_ids(1);
             return response;
@@ -362,8 +372,14 @@ impl Widget for FieldGroup<'_> {
         // being the field to open next (`None` past an end).
         let mut tab: Option<Option<usize>> = None;
         let mut leave_next = false;
+        if let Some(edit) = state.edit.as_ref() {
+            // A fresh editor takes focus below; do it now so a Tab pressed on
+            // its very first frame is handled like any other.
+            if edit.fresh {
+                ui.memory_mut(|m| m.request_focus(te_id));
+            }
+        }
         if let Some(edit) = state.edit.as_ref()
-            && !edit.fresh
             && ui.memory(|m| m.has_focus(te_id))
         {
             let back = ui.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::Tab));
@@ -389,7 +405,6 @@ impl Widget for FieldGroup<'_> {
             }
         }
 
-        let cells = layout_cells(group_rect.min, &mains, cross, orientation);
         let responses: Vec<Response> = cells
             .iter()
             .enumerate()
@@ -415,6 +430,8 @@ impl Widget for FieldGroup<'_> {
         // 1. The live text editor, if a session is active.
         let mut finish: Option<bool> = None;
         let mut tab_to: Option<usize> = None;
+        // Cell to hand keyboard focus back to after Enter / Escape.
+        let mut refocus: Option<usize> = None;
         if let Some(edit) = state.edit.as_mut() {
             edit.touch |= touch_now;
             if edit.fresh {
@@ -445,7 +462,7 @@ impl Widget for FieldGroup<'_> {
             let out = ui.place(area, editor);
             let (escape, enter) =
                 ui.input(|i| (i.key_pressed(Key::Escape), i.key_pressed(Key::Enter)));
-            if edit.fresh {
+            if edit.fresh && tab.is_none() {
                 edit.fresh = false;
             } else if let Some(next) = tab {
                 finish = Some(true);
@@ -460,8 +477,12 @@ impl Widget for FieldGroup<'_> {
                 }
             } else if escape {
                 finish = Some(false);
+                refocus = edit.keyboard.then_some(edit.host);
             } else if out.lost_focus() {
                 finish = Some(enter || !edit.touch);
+                if enter && edit.keyboard {
+                    refocus = Some(edit.host);
+                }
             }
         } else {
             // The editor is placed in a child `Ui`, which takes one auto id.
@@ -489,10 +510,19 @@ impl Widget for FieldGroup<'_> {
                     buffer: entries[next].value.to_field_text(),
                     fresh: true,
                     touch: false,
+                    keyboard: true,
                 });
+            }
+            if tab_to.is_none()
+                && let Some(host) = refocus
+            {
+                ui.memory_mut(|m| m.request_focus(id.with(host)));
             }
             ui.ctx().request_repaint();
         }
+        // The Enter / Escape that ended the edit must not act on the cell it
+        // just gave focus to.
+        let refocused = refocus.is_some() && finish.is_some() && state.edit.is_none();
 
         // 2. Press / drag / release while no editor is open. A press on another
         // cell while an editor is open is remembered as the anchor, so the
@@ -598,6 +628,7 @@ impl Widget for FieldGroup<'_> {
                                     buffer: entries[anchor].value.to_field_text(),
                                     fresh: true,
                                     touch: state.press_touch,
+                                    keyboard: false,
                                 });
                                 ui.ctx().request_repaint();
                             }
@@ -607,7 +638,8 @@ impl Widget for FieldGroup<'_> {
                     None if !down => state.clear_press(),
                     None => {}
                 }
-            } else if let Some(i) = responses.iter().position(Response::has_focus)
+            } else if !refocused
+                && let Some(i) = responses.iter().position(Response::has_focus)
                 && ui.input_mut(|inp| inp.consume_key(Modifiers::NONE, Key::Enter))
             {
                 state.edit = Some(Edit {
@@ -617,6 +649,7 @@ impl Widget for FieldGroup<'_> {
                     buffer: entries[i].value.to_field_text(),
                     fresh: true,
                     touch: false,
+                    keyboard: true,
                 });
                 ui.ctx().request_repaint();
             }
@@ -626,6 +659,7 @@ impl Widget for FieldGroup<'_> {
         // pointer click has opened the editor above already.
         if state.edit.is_none()
             && state.press.is_none()
+            && !refocused
             && let Some(i) = responses.iter().position(Response::clicked)
         {
             state.edit = Some(Edit {
@@ -635,6 +669,7 @@ impl Widget for FieldGroup<'_> {
                 buffer: entries[i].value.to_field_text(),
                 fresh: true,
                 touch: false,
+                keyboard: true,
             });
             ui.ctx().request_repaint();
         }
@@ -680,9 +715,12 @@ impl Widget for FieldGroup<'_> {
                 info
             });
             if responses[i].has_focus() {
+                if responses[i].gained_focus() {
+                    responses[i].scroll_to_me(None);
+                }
                 let stroke = ui.visuals().selection.stroke;
                 painter.add(Shape::rect_stroke(
-                    cell.shrink(stroke.width / 2.0),
+                    cell,
                     corner_radius_for(i, n, orientation, st.radius),
                     stroke,
                     egui::epaint::StrokeKind::Inside,

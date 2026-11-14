@@ -6,10 +6,13 @@
 //! [`egui::Image`] work out of the box; [`Icon`] and [`PaintCell`] cover
 //! sized images and custom drawing, and you can implement [`CellContent`]
 //! for your own icon type.
+//!
+//! A tuple `(A, B)` of two contents is itself content, laid out side by side,
+//! so a cell can show an icon and a label: `(Icon::new(image), "Snap")`.
 
 use std::borrow::Cow;
 
-use egui::{Color32, Image, Rect, RichText, TextStyle, Ui, Vec2, WidgetText};
+use egui::{Color32, Image, Rect, RichText, TextStyle, Ui, Vec2, WidgetText, pos2, vec2};
 
 use crate::paint::make_galley;
 
@@ -91,6 +94,37 @@ impl<T: CellContent + ?Sized> CellContent for Box<T> {
     }
     fn accessible_label(&self) -> Option<String> {
         (**self).accessible_label()
+    }
+}
+
+/// Two contents side by side, `A` on the left and `B` on the right, centred
+/// vertically and separated by `spacing().icon_spacing`. This is how a cell
+/// shows an icon and a label, for example `(Icon::new(image), "Snap")`.
+///
+/// Both parts are painted in the colour the group picked. The accessible
+/// label is the parts' labels joined with a space (or whichever one has one).
+impl<A: CellContent, B: CellContent> CellContent for (A, B) {
+    fn size(&self, ui: &Ui) -> Vec2 {
+        let (a, b) = (self.0.size(ui), self.1.size(ui));
+        vec2(a.x + ui.spacing().icon_spacing + b.x, a.y.max(b.y))
+    }
+
+    fn paint(&self, ui: &Ui, rect: Rect, color: Color32) {
+        let (a, b) = (self.0.size(ui), self.1.size(ui));
+        let gap = ui.spacing().icon_spacing;
+        let left = rect.center().x - (a.x + gap + b.x) / 2.0;
+        let cy = rect.center().y;
+        let a_rect = Rect::from_min_size(pos2(left, cy - a.y / 2.0), a);
+        let b_rect = Rect::from_min_size(pos2(a_rect.right() + gap, cy - b.y / 2.0), b);
+        self.0.paint(ui, a_rect, color);
+        self.1.paint(ui, b_rect, color);
+    }
+
+    fn accessible_label(&self) -> Option<String> {
+        match (self.0.accessible_label(), self.1.accessible_label()) {
+            (Some(a), Some(b)) => Some(format!("{a} {b}")),
+            (a, b) => a.or(b),
+        }
     }
 }
 

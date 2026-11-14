@@ -1,15 +1,42 @@
 //! The demo UI, shared by the native example and the web demo.
 
 use egui::{Color32, Stroke, Ui, Vec2, vec2};
-use egui_control_groups::{FieldGroup, GroupStyle, Number, PaintCell, ToggleGroup};
+use egui_control_groups::{
+    CellContent, FieldGroup, GroupStyle, Number, PaintCell, RadioGroup, ToggleGroup,
+};
+
+#[derive(Clone, Copy, PartialEq)]
+enum Shading {
+    Flat,
+    Smooth,
+    Wire,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Axis {
+    X,
+    Y,
+    Z,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SnapMode {
+    Grid,
+    Vertex,
+}
 
 pub struct Demo {
     style: StyleEdit,
     visibility: [bool; 4],
     axes: [bool; 3],
     modes: [bool; 3],
+    shading: Shading,
+    lock_axis: Option<Axis>,
     icons: [bool; 3],
     grid: bool,
+    snap_on: [bool; 2],
+    snap_mode: SnapMode,
+    snap_icon_mode: SnapMode,
     position: [f32; 3],
     size: [f32; 2],
     name: [String; 2],
@@ -23,8 +50,13 @@ impl Default for Demo {
             visibility: [true, false, true, false],
             axes: [true, false, false],
             modes: [true, false, false],
+            shading: Shading::Smooth,
+            lock_axis: None,
             icons: [true, false, true],
             grid: false,
+            snap_on: [true, false],
+            snap_mode: SnapMode::Grid,
+            snap_icon_mode: SnapMode::Vertex,
             position: [0.0, 1.5, -2.0],
             size: [64.0, 32.5],
             name: [String::from("Part"), String::from("A")],
@@ -67,6 +99,27 @@ impl Demo {
         );
 
         ui.add_space(16.0);
+        ui.heading("Radio");
+        ui.label("One value: the first always has a selection, the second can be cleared.");
+        ui.add(
+            RadioGroup::new("shading", &mut self.shading)
+                .style(style.clone())
+                .option(Shading::Flat, "Flat")
+                .option(Shading::Smooth, "Smooth")
+                .option(Shading::Wire, "Wire")
+                .equal_width(),
+        );
+        ui.add_space(8.0);
+        ui.add(
+            RadioGroup::optional("lock_axis", &mut self.lock_axis)
+                .style(style.clone())
+                .option(Axis::X, "X")
+                .option(Axis::Y, "Y")
+                .option(Axis::Z, "Z")
+                .equal_width(),
+        );
+
+        ui.add_space(16.0);
         ui.heading("Plain icon buttons");
         ui.label("No active fill: only the icon changes with the state.");
         let [lock, show, snap] = &mut self.icons;
@@ -83,6 +136,37 @@ impl Demo {
                 .state_cell(ring(false), ring(true), &mut self.grid)
                 .tooltip("Grid")
                 .highlight_active(false),
+        );
+
+        ui.add_space(16.0);
+        ui.heading("Dropdown");
+        ui.label("A cell that opens a list. Dragging across it skips it.");
+        let [snap, align] = &mut self.snap_on;
+        ui.add(
+            ToggleGroup::new("dropdown")
+                .style(style.clone())
+                .cell("Snap", snap)
+                .cell("Align", align)
+                .dropdown(
+                    &mut self.snap_mode,
+                    [(SnapMode::Grid, "Grid"), (SnapMode::Vertex, "Vertex")],
+                ),
+        );
+        ui.add_space(8.0);
+        // Options can be an icon and text: any pair of cell contents.
+        let option = |mode, icon: Box<dyn CellContent>, text: &'static str| {
+            (mode, Box::new((icon, text)) as Box<dyn CellContent>)
+        };
+        ui.add(
+            ToggleGroup::new("dropdown_icons")
+                .style(style.clone())
+                .dropdown(
+                    &mut self.snap_icon_mode,
+                    [
+                        option(SnapMode::Grid, Box::new(ring(false)), "Grid"),
+                        option(SnapMode::Vertex, Box::new(square(false)), "Vertex"),
+                    ],
+                ),
         );
 
         ui.add_space(16.0);
