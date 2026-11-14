@@ -29,6 +29,7 @@ struct Harness {
     time: f64,
     modifiers: Modifiers,
     sent_modifiers: Modifiers,
+    repaint_delay: std::time::Duration,
     painted: Painted,
 }
 
@@ -39,6 +40,7 @@ impl Harness {
             time: 0.0,
             modifiers: Modifiers::NONE,
             sent_modifiers: Modifiers::NONE,
+            repaint_delay: std::time::Duration::MAX,
             painted: Painted::default(),
         }
     }
@@ -57,6 +59,12 @@ impl Harness {
             ..Default::default()
         };
         let output = self.ctx.run_ui(input, |ui| ui_fn(ui));
+        self.repaint_delay = output
+            .viewport_output
+            .values()
+            .map(|v| v.repaint_delay)
+            .min()
+            .unwrap_or(std::time::Duration::MAX);
         self.painted = Painted::default();
         for clipped in &output.shapes {
             collect(&clipped.shape, &mut self.painted);
@@ -817,4 +825,48 @@ fn touch_drag_moves_the_selection() {
     touch_up(&mut h, &mut e, p);
     h.idle(|ui| e.show(ui));
     assert_eq!(e.t.v, [false, false, true, false]);
+}
+
+#[test]
+fn touch_long_press_schedules_a_repaint() {
+    // A resting finger produces no input, so the widget must ask for the
+    // frame at which the long press becomes due.
+    let (mut h, mut e) = exclusive(vec![false; 3]);
+    let p = e.t.center(1);
+    touch_down(&mut h, &mut e, p);
+    assert!(h.repaint_delay < std::time::Duration::from_secs(2));
+}
+
+#[test]
+fn touch_applies_on_release_in_plain_groups_too() {
+    let (mut h, mut t) = (Harness::new(), Toggles::new(vec![false; 3]));
+    warm(&mut h, &mut t);
+    let p = t.center(1);
+    let mut ev = vec![touch(p, egui::TouchPhase::Start)];
+    ev.extend(button(p, true));
+    h.frame(ev, |ui| t.show(ui));
+    assert_eq!(t.v, [false; 3], "nothing before release");
+    let mut ev = vec![touch(p, egui::TouchPhase::End)];
+    ev.extend(button(p, false));
+    h.frame(ev, |ui| t.show(ui));
+    assert_eq!(t.v, [false, true, false]);
+}
+
+#[test]
+fn touch_drag_paints_in_plain_groups() {
+    let (mut h, mut t) = (Harness::new(), Toggles::new(vec![false; 4]));
+    warm(&mut h, &mut t);
+    let start = t.center(0);
+    let mut ev = vec![touch(start, egui::TouchPhase::Start)];
+    ev.extend(button(start, true));
+    h.frame(ev, |ui| t.show(ui));
+    let end = t.center(3);
+    h.frame(
+        vec![touch(end, egui::TouchPhase::Move), Event::PointerMoved(end)],
+        |ui| t.show(ui),
+    );
+    let mut ev = vec![touch(end, egui::TouchPhase::End)];
+    ev.extend(button(end, false));
+    h.frame(ev, |ui| t.show(ui));
+    assert_eq!(t.v, [true; 4]);
 }
