@@ -6,11 +6,11 @@ use std::hash::Hash;
 
 use egui::text::{CCursor, CCursorRange, CharIndex};
 use egui::{
-    Align, Color32, Id, Key, Margin, Modifiers, Rect, Response, Sense, Shape, TextEdit, TextStyle,
-    Ui, Vec2, Widget, WidgetText, vec2,
+    Align, Color32, Id, Key, Margin, Modifiers, Pos2, Rect, Response, Sense, Shape, TextEdit,
+    TextStyle, Ui, Vec2, Widget, WidgetInfo, WidgetText, vec2,
 };
 
-use crate::geometry::{Orientation, index_at, layout_cells};
+use crate::geometry::{Orientation, corner_radius_for, index_at, layout_cells};
 use crate::paint::{centered_galley, frame_shapes, make_galley};
 use crate::style::GroupStyle;
 
@@ -93,7 +93,32 @@ struct State {
     press: Option<usize>,
     /// A finger (not a mouse) was seen during the current press.
     press_touch: bool,
+    /// Where and when the current press began (for touch gesture decisions).
+    press_origin: Pos2,
+    press_start: f64,
+    touch_mode: TouchMode,
     edit: Option<Edit>,
+}
+
+impl State {
+    fn clear_press(&mut self) {
+        self.press = None;
+        self.press_touch = false;
+        self.touch_mode = TouchMode::Pending;
+    }
+}
+
+/// What a touch that began on a cell is turning into.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum TouchMode {
+    /// A tap so far: release opens the editor.
+    #[default]
+    Pending,
+    /// Drag-select across cells.
+    Drag,
+    /// Moved too far to be a tap without starting a drag-select (a swipe or
+    /// scroll): the rest of the gesture does nothing.
+    Cancelled,
 }
 
 #[derive(Clone)]
@@ -306,6 +331,50 @@ impl Widget for FieldGroup<'_> {
                 i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()),
             )
         });
+        let (long_press, max_dist) = ui.ctx().options(|o| {
+            (
+                o.input_options.max_click_duration,
+                o.input_options.max_click_dist,
+            )
+        });
+        let mut touch_hold_pending = false;
+        if state.press.is_some() && state.press_touch {
+            // Latest touch position, which on a release frame may only be in
+            // the events.
+            let pos = ui
+                .input(|i| {
+                    i.events.iter().rev().find_map(|e| match e {
+                        egui::Event::Touch { pos, .. } => Some(*pos),
+                        _ => None,
+                    })
+                })
+                .or(pointer);
+            if let (TouchMode::Pending, Some(pos), Some(anchor)) =
+                (state.touch_mode, pos, state.press)
+            {
+                let now = ui.input(|i| i.time);
+                let held = now - state.press_start >= long_press;
+                if pos.distance(state.press_origin) > max_dist {
+                    // Crossing into a horizontal neighbour is a drag-select; a
+                    // vertical move is only one after a hold, as otherwise it
+                    // cannot be told from a swipe.
+                    let crossed = index_at(&cells, pos, orientation) != anchor;
+                    state.touch_mode =
+                        if held || (crossed && orientation == Orientation::Horizontal) {
+                            TouchMode::Drag
+                        } else {
+                            TouchMode::Cancelled
+                        };
+                } else if now - state.press_start < long_press {
+                    touch_hold_pending = true;
+                }
+            }
+        }
+        if touch_hold_pending {
+            ui.ctx().request_repaint_after_secs(
+                (long_press - (ui.input(|i| i.time) - state.press_start)) as f32,
+            );
+        }
         let mut drag_range: Option<(usize, usize)> = None;
         if let Some(edit) = &state.edit {
             if state.press.is_none()
@@ -314,9 +383,11 @@ impl Widget for FieldGroup<'_> {
                 && i != edit.host
             {
                 state.press = Some(i);
+                state.press_origin = pointer.unwrap_or_else(|| cells[i].center());
+                state.press_start = ui.input(|i| i.time);
+                state.touch_mode = TouchMode::Pending;
             } else if !down {
-                state.press = None;
-                state.press_touch = false;
+                state.clear_press();
             }
             if state.press.is_some() {
                 state.press_touch |= touch_now;
@@ -327,6 +398,9 @@ impl Widget for FieldGroup<'_> {
                 && let Some(i) = responses.iter().position(Response::hovered)
             {
                 state.press = Some(i);
+                state.press_origin = pointer.unwrap_or_else(|| cells[i].center());
+                state.press_start = ui.input(|i| i.time);
+                state.touch_mode = TouchMode::Pending;
             }
             if state.press.is_some() {
                 state.press_touch |= touch_now;
@@ -336,10 +410,14 @@ impl Widget for FieldGroup<'_> {
                     Some(pos) => {
                         let j = index_at(&cells, pos, orientation);
                         let (lo, hi) = (anchor.min(j), anchor.max(j));
+                        let cancelled = state.touch_mode == TouchMode::Cancelled;
+                        let tentative = state.press_touch && state.touch_mode == TouchMode::Pending;
                         if down {
-                            drag_range = Some((lo, hi));
+                            if !cancelled && !tentative {
+                                drag_range = Some((lo, hi));
+                            }
                         } else {
-                            if hi > lo || cells[anchor].contains(pos) {
+                            if !cancelled && (hi > lo || cells[anchor].contains(pos)) {
                                 state.edit = Some(Edit {
                                     lo,
                                     hi,
@@ -350,14 +428,10 @@ impl Widget for FieldGroup<'_> {
                                 });
                                 ui.ctx().request_repaint();
                             }
-                            state.press = None;
-                            state.press_touch = false;
+                            state.clear_press();
                         }
                     }
-                    None if !down => {
-                        state.press = None;
-                        state.press_touch = false;
-                    }
+                    None if !down => state.clear_press(),
                     None => {}
                 }
             } else if let Some(i) = responses.iter().position(Response::has_focus)
@@ -375,6 +449,23 @@ impl Widget for FieldGroup<'_> {
             }
         }
 
+        // An AccessKit click (or Space) on a cell acts like Enter on it. A
+        // pointer click has opened the editor above already.
+        if state.edit.is_none()
+            && state.press.is_none()
+            && let Some(i) = responses.iter().position(Response::clicked)
+        {
+            state.edit = Some(Edit {
+                lo: i,
+                hi: i,
+                host: i,
+                buffer: entries[i].value.to_field_text(),
+                fresh: true,
+                touch: false,
+            });
+            ui.ctx().request_repaint();
+        }
+
         // 3. Paint everything that sits under the editor.
         let editing = state.edit.as_ref().map(|e| (e.lo, e.hi, e.host));
         let hovered = responses.iter().position(Response::hovered);
@@ -390,7 +481,8 @@ impl Widget for FieldGroup<'_> {
                 _ => st.fill,
             })
             .collect();
-        let mut shapes = frame_shapes(group_rect, &cells, orientation, &st, &fills);
+        let shapes = frame_shapes(group_rect, &cells, orientation, &st, &fills);
+        ui.painter().set(bg_slot, Shape::Vec(shapes));
 
         // Are the editor's characters all selected? Then mirror that highlight.
         let all_selected = state.edit.as_ref().is_some_and(|e| {
@@ -402,13 +494,38 @@ impl Widget for FieldGroup<'_> {
 
         for i in 0..n {
             let cell = cells[i];
-            if let Some(label) = entries[i].label.take() {
+            // Text never leaves its own cell.
+            let painter = ui.painter_at(cell);
+            let value_text = entries[i].value.to_field_text();
+            let label = entries[i].label.take();
+            let enabled = ui.is_enabled();
+            let label_text = label.as_ref().map(|l| l.text().to_owned());
+            responses[i].widget_info(|| {
+                let mut info = WidgetInfo::text_edit(
+                    enabled,
+                    value_text.clone(),
+                    value_text.clone(),
+                    String::new(),
+                );
+                info.label = label_text.clone();
+                info
+            });
+            if responses[i].has_focus() {
+                let stroke = ui.visuals().selection.stroke;
+                painter.add(Shape::rect_stroke(
+                    cell.shrink(stroke.width / 2.0),
+                    corner_radius_for(i, n, orientation, st.radius),
+                    stroke,
+                    egui::epaint::StrokeKind::Inside,
+                ));
+            }
+            if let Some(label) = label {
                 let galley = make_galley(ui, label);
                 let pos = egui::pos2(
                     cell.left() + st.padding.x,
                     cell.center().y - galley.size().y / 2.0,
                 );
-                shapes.push(Shape::galley(pos, galley, st.muted_text));
+                painter.add(Shape::galley(pos, galley, st.muted_text));
             }
             let is_host = editing.is_some_and(|(_, _, h)| h == i);
             if is_host {
@@ -420,16 +537,15 @@ impl Widget for FieldGroup<'_> {
                 .filter(|e| (e.lo..=e.hi).contains(&i))
                 .map(|e| e.buffer.clone());
             let mirror_active = mirrored.is_some();
-            let text = mirrored.unwrap_or_else(|| entries[i].value.to_field_text());
+            let text = mirrored.unwrap_or(value_text);
             let galley = make_galley(ui, text.into());
             if mirror_active && all_selected {
                 let r =
                     Rect::from_center_size(cell.center(), galley.size()).expand2(vec2(2.0, 1.0));
-                shapes.push(Shape::rect_filled(r, 2.0, st.active_fill));
+                painter.add(Shape::rect_filled(r, 2.0, st.active_fill));
             }
-            shapes.push(centered_galley(cell, &galley, st.text));
+            painter.add(centered_galley(cell, &galley, st.text));
         }
-        ui.painter().set(bg_slot, Shape::Vec(shapes));
 
         ui.data_mut(|d| d.insert_temp(id, state));
         if changed {
