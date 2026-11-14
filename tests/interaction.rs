@@ -421,6 +421,93 @@ fn text_fields_commit_strings() {
     assert_eq!((a.as_str(), b.as_str()), ("hej", "hej"));
 }
 
+/// Two f64 fields with a local closure that records `changed()`.
+struct PreciseFields {
+    v: [f64; 2],
+    rect: Rect,
+    changed: bool,
+}
+
+impl PreciseFields {
+    fn show(&mut self, ui: &mut Ui) {
+        let [a, b] = &mut self.v;
+        let r = ui.add(FieldGroup::new("p").field(a).field(b).cell_width(80.0));
+        self.rect = r.rect;
+        self.changed |= r.changed();
+    }
+
+    fn center(&self, i: usize) -> Pos2 {
+        pos2(
+            self.rect.left() + 80.0 * (i as f32 + 0.5),
+            self.rect.center().y,
+        )
+    }
+
+    fn click(&mut self, h: &mut Harness, p: Pos2) {
+        h.moved(p, |ui| self.show(ui));
+        h.press(p, |ui| self.show(ui));
+        h.release(p, |ui| self.show(ui));
+        for _ in 0..3 {
+            h.idle(|ui| self.show(ui));
+        }
+    }
+}
+
+#[test]
+fn clicking_in_and_away_leaves_precise_floats_untouched() {
+    let mut h = Harness::new();
+    let mut f = PreciseFields {
+        v: [1.234_567_89, 0.000_000_1],
+        rect: Rect::NOTHING,
+        changed: false,
+    };
+    for _ in 0..3 {
+        h.idle(|ui| f.show(ui));
+    }
+    f.click(&mut h, f.center(0));
+    // Click away, outside the group.
+    let away = pos2(f.rect.center().x, f.rect.bottom() + 100.0);
+    f.click(&mut h, away);
+    // Same for the tiny value.
+    f.click(&mut h, f.center(1));
+    f.click(&mut h, away);
+    assert_eq!(f.v, [1.234_567_89, 0.000_000_1]);
+    assert!(!f.changed);
+}
+
+#[test]
+fn committing_an_edited_value_writes_and_reports_changed() {
+    let mut h = Harness::new();
+    let mut f = PreciseFields {
+        v: [1.234_567_89, 2.0],
+        rect: Rect::NOTHING,
+        changed: false,
+    };
+    for _ in 0..3 {
+        h.idle(|ui| f.show(ui));
+    }
+    f.click(&mut h, f.center(0));
+    h.type_text("4.5", |ui| f.show(ui));
+    h.key(Key::Enter, |ui| f.show(ui));
+    h.idle(|ui| f.show(ui));
+    assert_eq!(f.v, [4.5, 2.0]);
+    assert!(f.changed);
+}
+
+#[test]
+fn clicking_another_field_commits_and_opens_it_in_one_click() {
+    let (mut h, mut f) = (Harness::new(), Fields::new());
+    fwarm(&mut h, &mut f);
+    gesture(&mut h, &mut f, 0, 0);
+    h.type_text("5", |ui| f.show(ui));
+    gesture(&mut h, &mut f, 2, 2);
+    assert_eq!(f.v, [5.0, 2.0, 3.0]);
+    h.type_text("9", |ui| f.show(ui));
+    h.key(Key::Enter, |ui| f.show(ui));
+    h.idle(|ui| f.show(ui));
+    assert_eq!(f.v, [5.0, 2.0, 9.0]);
+}
+
 // ----------------------------------------------------- state-dependent icons
 
 /// Plain icon-style buttons: content swaps with the state, no active fill.
@@ -876,6 +963,74 @@ fn touch_drag_paints_in_plain_groups() {
     ev.extend(button(end, false));
     h.frame(ev, |ui| t.show(ui));
     assert_eq!(t.v, [true; 4]);
+}
+
+#[test]
+fn touch_vertical_swipe_does_not_toggle_exclusive() {
+    let (mut h, mut e) = exclusive(vec![true, false, false]);
+    let start = e.t.center(1);
+    touch_down(&mut h, &mut e, start);
+    let mut q = start;
+    for _ in 0..10 {
+        q.y += 20.0;
+        h.frame(
+            vec![touch(q, egui::TouchPhase::Move), Event::PointerMoved(q)],
+            |ui| e.show(ui),
+        );
+    }
+    touch_up(&mut h, &mut e, q);
+    h.idle(|ui| e.show(ui));
+    assert_eq!(e.t.v, [true, false, false]);
+}
+
+#[test]
+fn touch_vertical_swipe_does_not_toggle_plain_group() {
+    let (mut h, mut e) = exclusive(vec![false, true, false]);
+    e.exclusive = false;
+    let start = e.t.center(1);
+    touch_down(&mut h, &mut e, start);
+    let mut q = start;
+    for _ in 0..10 {
+        q.y += 20.0;
+        h.frame(
+            vec![touch(q, egui::TouchPhase::Move), Event::PointerMoved(q)],
+            |ui| e.show(ui),
+        );
+    }
+    touch_up(&mut h, &mut e, q);
+    h.idle(|ui| e.show(ui));
+    assert_eq!(e.t.v, [false, true, false]);
+}
+
+#[test]
+fn touch_swipe_arriving_on_the_release_frame_does_not_toggle() {
+    for exclusive_group in [true, false] {
+        let (mut h, mut e) = exclusive(vec![true, false, false]);
+        e.exclusive = exclusive_group;
+        let start = e.t.center(1);
+        touch_down(&mut h, &mut e, start);
+        let far = pos2(start.x, start.y + 200.0);
+        let mut ev = vec![Event::PointerMoved(far), touch(far, egui::TouchPhase::End)];
+        ev.extend(button(far, false));
+        h.frame(ev, |ui| e.show(ui));
+        h.idle(|ui| e.show(ui));
+        assert_eq!(e.t.v, [true, false, false]);
+    }
+}
+
+#[test]
+fn touch_small_jitter_still_taps() {
+    let (mut h, mut e) = exclusive(vec![true, false, false]);
+    let start = e.t.center(1);
+    touch_down(&mut h, &mut e, start);
+    let q = pos2(start.x + 1.0, start.y + 2.0);
+    h.frame(
+        vec![touch(q, egui::TouchPhase::Move), Event::PointerMoved(q)],
+        |ui| e.show(ui),
+    );
+    touch_up(&mut h, &mut e, q);
+    h.idle(|ui| e.show(ui));
+    assert_eq!(e.t.v, [false, true, false]);
 }
 
 #[test]

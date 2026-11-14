@@ -35,8 +35,9 @@ enum Mode {
     /// Touch, not yet decided: a tap acts on release, moving to another cell
     /// starts a drag, and in an exclusive group a long press extends.
     Pending { start: f64, pos: Pos2 },
-    /// An extending press that changed nothing (it would have switched off
-    /// the last active cell); dragging does nothing.
+    /// The rest of the gesture does nothing: an extending press that changed
+    /// nothing (it would have switched off the last active cell), or a touch
+    /// that strayed too far from where it began to be a tap.
     Inert,
 }
 
@@ -479,7 +480,11 @@ impl Widget for ToggleGroup<'_> {
                             g.mode = Mode::Paint(target);
                         }
                         g.last = idx;
-                    } else if exclusive && pos.distance(origin) <= max_dist {
+                    } else if pos.distance(origin) > max_dist {
+                        // Wandered off within the same cell (a scroll, say):
+                        // neither a tap nor a long press any more.
+                        g.mode = Mode::Inert;
+                    } else if exclusive {
                         if now - start >= long_press {
                             let (c, mode) = extend_press(&mut values, g.last, require_one);
                             changed |= c;
@@ -498,9 +503,17 @@ impl Widget for ToggleGroup<'_> {
         if !down {
             // A touch released without moving or waiting is a tap.
             if let Some(Gesture {
-                mode: Mode::Pending { .. },
+                mode: Mode::Pending { pos: origin, .. },
                 last,
             }) = gesture
+                // The release frame can carry the whole movement, with no
+                // `down` frame to notice it in.
+                && !ui.input(|i| {
+                    i.events.iter().any(|e| {
+                        matches!(e, egui::Event::Touch { pos, .. } if pos.distance(origin) > max_dist)
+                    })
+                })
+                && pointer.is_none_or(|p| p.distance(origin) <= max_dist)
             {
                 changed |= if exclusive {
                     plain_press(&mut values, last, require_one).0
