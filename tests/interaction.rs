@@ -631,6 +631,7 @@ struct Exclusive {
     t: Toggles,
     require_one: bool,
     exclusive: bool,
+    settle: bool,
 }
 
 impl Exclusive {
@@ -639,6 +640,7 @@ impl Exclusive {
             t: Toggles::new(v),
             require_one: false,
             exclusive: true,
+            settle: false,
         }
     }
 
@@ -648,7 +650,8 @@ impl Exclusive {
             .cells(["A", "B", "C", "D"].into_iter().take(n), &mut self.t.v)
             .equal_width()
             .exclusive(self.exclusive)
-            .require_one(self.require_one);
+            .require_one(self.require_one)
+            .settle_press(self.settle);
         self.t.rect = ui.add(g).rect;
     }
 }
@@ -880,6 +883,7 @@ fn web_touch_order_does_not_act_on_the_press_frame() {
     for exclusive_group in [false, true] {
         let (mut h, mut e) = exclusive(vec![false, false, false]);
         e.exclusive = exclusive_group;
+        e.settle = true;
         let p = e.t.center(1);
         h.frame(button(p, true), |ui| e.show(ui));
         h.frame(vec![touch(p, egui::TouchPhase::Start)], |ui| e.show(ui));
@@ -895,14 +899,26 @@ fn web_touch_order_does_not_act_on_the_press_frame() {
 }
 
 #[test]
-fn mouse_press_takes_effect_on_the_next_frame() {
+fn mouse_press_acts_on_the_press_frame_by_default() {
     let (mut h, mut t) = (Harness::new(), Toggles::new(vec![false; 3]));
     warm(&mut h, &mut t);
     let p = t.center(1);
     h.moved(p, |ui| t.show(ui));
     h.press(p, |ui| t.show(ui));
-    h.idle(|ui| t.show(ui));
-    assert_eq!(t.v, [false, true, false], "applied while still held");
+    assert_eq!(t.v, [false, true, false]);
+}
+
+#[test]
+fn settled_mouse_press_takes_effect_on_the_next_frame() {
+    let (mut h, mut e) = exclusive(vec![false; 3]);
+    e.exclusive = false;
+    e.settle = true;
+    let p = e.t.center(1);
+    h.moved(p, |ui| e.show(ui));
+    h.press(p, |ui| e.show(ui));
+    assert_eq!(e.t.v, [false; 3]);
+    h.idle(|ui| e.show(ui));
+    assert_eq!(e.t.v, [false, true, false]);
 }
 
 // ------------------------------------------------------------ touch fields

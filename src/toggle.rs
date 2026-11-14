@@ -25,9 +25,8 @@ struct Cell<'a> {
 /// What the current pointer gesture does as it moves across cells.
 #[derive(Clone, Copy)]
 enum Mode {
-    /// Just pressed. A finger and a mouse look the same on the press frame
-    /// (on the web the pointer event is handled before the touch event), so
-    /// the widget waits one frame to see which it is.
+    /// Just pressed, and waiting one frame to tell a finger from a mouse.
+    /// Only used when `settle_press` is on, see there.
     Undecided { start: f64, pos: Pos2 },
     /// Set every cell touched to `target`.
     Paint(bool),
@@ -163,6 +162,7 @@ pub struct ToggleGroup<'a> {
     exclusive: bool,
     require_one: bool,
     extend: Modifiers,
+    settle_press: bool,
     style: GroupStyle,
 }
 
@@ -178,6 +178,7 @@ impl<'a> ToggleGroup<'a> {
             exclusive: false,
             require_one: false,
             extend: Modifiers::SHIFT,
+            settle_press: cfg!(target_arch = "wasm32"),
             style: GroupStyle::default(),
         }
     }
@@ -276,6 +277,20 @@ impl<'a> ToggleGroup<'a> {
         self
     }
 
+    /// Wait one frame after a press before acting on it, to tell a finger
+    /// from a mouse.
+    ///
+    /// This works around a browser quirk: a touch fires the pointer event
+    /// first, and eframe runs a frame for it before the touch event arrives,
+    /// so on that frame the two look the same. It is on by default on wasm
+    /// and off elsewhere, where touch and pointer events arrive together.
+    /// Exposed so the web behaviour can be tested natively.
+    #[doc(hidden)]
+    pub fn settle_press(mut self, settle: bool) -> Self {
+        self.settle_press = settle;
+        self
+    }
+
     /// Stack the cells top to bottom instead of left to right.
     pub fn vertical(mut self) -> Self {
         self.orientation = Orientation::Vertical;
@@ -306,6 +321,7 @@ impl Widget for ToggleGroup<'_> {
             exclusive,
             require_one,
             extend,
+            settle_press,
             style,
         } = self;
         let n = cells.len();
@@ -391,16 +407,26 @@ impl Widget for ToggleGroup<'_> {
             && pressed
             && let Some(i) = responses.iter().position(Response::hovered)
         {
-            gesture = Some(Gesture {
-                mode: Mode::Undecided {
+            let origin = pointer.unwrap_or_else(|| rects[i].center());
+            let mode = if settle_press {
+                Mode::Undecided {
                     start: now,
-                    pos: pointer.unwrap_or_else(|| rects[i].center()),
-                },
-                last: i,
-            });
+                    pos: origin,
+                }
+            } else if touch {
+                Mode::Pending {
+                    start: now,
+                    pos: origin,
+                }
+            } else {
+                let (c, mode) = press(&mut values, i, exclusive, extending, require_one);
+                changed |= c;
+                mode
+            };
+            gesture = Some(Gesture { mode, last: i });
             began = true;
         }
-        // Decide what kind of press it was, one frame after it happened.
+        // With `settle_press`: decide what kind of press it was, a frame later.
         if let Some(g) = gesture.as_mut()
             && let Mode::Undecided { start, pos } = g.mode
             && (!began || !down)
