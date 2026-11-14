@@ -1,6 +1,6 @@
 [package]
 name = "egui-control-groups"
-version = "0.1.0"
+version = "0.36.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Joined, Blender-style control groups for egui: rounded toggle rows with drag-to-paint and text fields with multi-edit"
@@ -8,6 +8,7 @@ readme = "README.md"
 license = "MIT"
 keywords = ["egui", "gui", "widgets", "blender"]
 categories = ["gui"]
+exclude = ["web-demo", ".github"]
 
 [dependencies]
 egui = "0.36"
