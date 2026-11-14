@@ -48,7 +48,8 @@ ui.add(
 `FieldGroup` edits `String`, the integer types, `f32` and `f64`. Implement
 `FieldValue` for other types.
 
-`cargo run --example demo` shows everything.
+`cargo run --example demo` shows everything. A web build runs at
+https://deuracell.github.io/egui_control_groups/ (source in `web-demo/`).
 
 ## License
 

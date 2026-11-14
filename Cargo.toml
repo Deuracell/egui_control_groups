@@ -8,6 +8,7 @@ readme = "README.md"
 license = "MIT"
 keywords = ["egui", "gui", "widgets", "blender"]
 categories = ["gui"]
+exclude = ["web-demo", ".github"]
 
 [dependencies]
 egui = "0.36"
