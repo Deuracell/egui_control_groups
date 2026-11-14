@@ -754,6 +754,28 @@ impl Widget for FieldGroup<'_> {
             painter.add(centered_galley(cell, &galley, st.text));
         }
 
+        // An editor opened this frame only takes focus on the next one. When it
+        // replaces another editor (a tap on a neighbouring field), that leaves
+        // one frame with no text input at all, on which a backend closes the
+        // soft keyboard only to open it again. Claim the text input now, so
+        // the keyboard stays up across the handover.
+        if let Some(edit) = state.edit.as_ref().filter(|e| e.fresh) {
+            let to_global = ui
+                .ctx()
+                .layer_transform_to_global(ui.layer_id())
+                .unwrap_or_default();
+            let cell = cells[edit.host];
+            let cursor = Rect::from_center_size(cell.center(), vec2(1.0, text_h));
+            ui.output_mut(|o| {
+                o.ime.get_or_insert(egui::output::IMEOutput {
+                    purpose: egui::IMEPurpose::Normal,
+                    rect: to_global * cell,
+                    cursor_rect: to_global * cursor,
+                    should_interrupt_composition: false,
+                });
+            });
+        }
+
         if before.as_ref() != Some(&state) {
             ui.data_mut(|d| d.insert_temp(id, state));
         }
