@@ -143,7 +143,8 @@ struct StyleEdit {
     active_fill: Option<Color32>,
     text: Option<Color32>,
     active_text: Option<Color32>,
-    border: Option<Color32>,
+    outline: Option<Color32>,
+    divider: Option<Color32>,
 }
 
 impl Default for StyleEdit {
@@ -158,21 +159,24 @@ impl Default for StyleEdit {
             active_fill: None,
             text: None,
             active_text: None,
-            border: None,
+            outline: None,
+            divider: None,
         }
     }
 }
 
 impl StyleEdit {
     fn to_style(&self, ui: &Ui) -> GroupStyle {
-        let border = self
-            .border
+        let outline = self
+            .outline
             .unwrap_or(ui.visuals().widgets.noninteractive.bg_stroke.color);
+        // Dividers follow the outline unless given a colour of their own.
+        let divider = self.divider.unwrap_or(outline);
         let mut s = GroupStyle::default()
             .corner_radius(self.radius)
             .padding(self.padding)
-            .outline(Stroke::new(self.outline_width, border))
-            .divider(Stroke::new(self.divider_width, border));
+            .outline(Stroke::new(self.outline_width, outline))
+            .divider(Stroke::new(self.divider_width, divider));
         if let Some(c) = self.fill {
             s = s.fill(c);
         }
@@ -212,32 +216,35 @@ impl StyleEdit {
                     ui.label("Divider width");
                     ui.add(egui::Slider::new(&mut self.divider_width, 0.0..=4.0));
                     ui.end_row();
-                    color_row(ui, "Fill", &mut self.fill, v.widgets.inactive.weak_bg_fill);
+                    let style = "from egui style";
+                    let w = &v.widgets;
+                    color_row(ui, "Fill", &mut self.fill, w.inactive.weak_bg_fill, style);
                     color_row(
                         ui,
                         "Hover fill",
                         &mut self.hover_fill,
-                        v.widgets.hovered.weak_bg_fill,
+                        w.hovered.weak_bg_fill,
+                        style,
                     );
                     color_row(
                         ui,
                         "Active fill",
                         &mut self.active_fill,
                         v.selection.bg_fill,
+                        style,
                     );
-                    color_row(ui, "Text", &mut self.text, v.widgets.inactive.text_color());
+                    color_row(ui, "Text", &mut self.text, w.inactive.text_color(), style);
                     color_row(
                         ui,
                         "Active text",
                         &mut self.active_text,
-                        v.widgets.active.text_color(),
+                        w.active.text_color(),
+                        style,
                     );
-                    color_row(
-                        ui,
-                        "Outline and divider",
-                        &mut self.border,
-                        v.widgets.noninteractive.bg_stroke.color,
-                    );
+                    let border = w.noninteractive.bg_stroke.color;
+                    color_row(ui, "Outline", &mut self.outline, border, style);
+                    let outline = self.outline.unwrap_or(border);
+                    color_row(ui, "Divider", &mut self.divider, outline, "same as outline");
                 });
                 if ui.button("Reset").clicked() {
                     *self = Self::default();
@@ -247,7 +254,7 @@ impl StyleEdit {
 }
 
 /// A checkbox that switches a colour override on, and its picker.
-fn color_row(ui: &mut Ui, label: &str, value: &mut Option<Color32>, default: Color32) {
+fn color_row(ui: &mut Ui, label: &str, value: &mut Option<Color32>, default: Color32, unset: &str) {
     ui.label(label);
     ui.horizontal(|ui| {
         let mut custom = value.is_some();
@@ -257,7 +264,7 @@ fn color_row(ui: &mut Ui, label: &str, value: &mut Option<Color32>, default: Col
         if let Some(c) = value {
             ui.color_edit_button_srgba(c);
         } else {
-            ui.weak("from egui style");
+            ui.weak(unset);
         }
     });
     ui.end_row();
