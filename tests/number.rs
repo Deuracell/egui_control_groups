@@ -274,3 +274,40 @@ fn multi_edit_applies_each_numbers_own_clamp() {
     f.done();
     assert_eq!(f.vals, [10.0, 10.0, 3.0]);
 }
+
+#[test]
+fn integers_saturate_out_of_range_text() {
+    let mut v = 5_u8;
+    let mut n = Number::new(&mut v).range(0..=100);
+    assert!(n.set_from_field_text("300"));
+    drop(n);
+    assert_eq!(v, 100);
+    let mut n = Number::new(&mut v).range(10..=100);
+    assert!(n.set_from_field_text("-5"));
+    drop(n);
+    assert_eq!(v, 10);
+    let mut n = Number::new(&mut v);
+    assert!(n.set_from_field_text("99999999999999999999999"));
+    drop(n);
+    assert_eq!(v, u8::MAX);
+    let mut w = 0_i8;
+    let mut n = Number::new(&mut w);
+    assert!(n.set_from_field_text("-1000"));
+    drop(n);
+    assert_eq!(w, i8::MIN);
+    let mut n = Number::new(&mut w);
+    assert!(n.set_from_field_text("+1000"));
+    drop(n);
+    assert_eq!(w, i8::MAX);
+}
+
+#[test]
+fn integers_still_reject_non_integers() {
+    let mut v = 7_u8;
+    let mut n = Number::new(&mut v);
+    for bad in ["", "-", "+", "abc", "1.5", "3e2", "12x", "--1"] {
+        assert!(!n.set_from_field_text(bad), "{bad:?}");
+    }
+    drop(n);
+    assert_eq!(v, 7);
+}
