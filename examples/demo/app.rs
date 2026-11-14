@@ -40,7 +40,8 @@ pub struct Demo {
     position: [f32; 3],
     size: [f32; 2],
     name: [String; 2],
-    panel_width: f32,
+    fill: bool,
+    group_width: f32,
 }
 
 impl Default for Demo {
@@ -60,36 +61,79 @@ impl Default for Demo {
             position: [0.0, 1.5, -2.0],
             size: [64.0, 32.5],
             name: [String::from("Part"), String::from("A")],
-            panel_width: 360.0,
+            fill: true,
+            group_width: 220.0,
         }
     }
 }
 
 impl Demo {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        self.style.ui(ui);
-        let style = self.style.to_style(ui);
-        ui.add_space(8.0);
+        // Wide windows get the style controls in a side panel; narrow ones
+        // (phones) get them folded away at the top.
+        let wide = ui.available_width() >= 700.0;
+        if wide {
+            egui::Panel::left("style_panel")
+                .resizable(false)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        title(ui, "Style");
+                        self.style.ui(ui);
+                    });
+                });
+        }
+        egui::ScrollArea::vertical()
+            .auto_shrink(false)
+            .show(ui, |ui| {
+                if !wide {
+                    egui::CollapsingHeader::new("Style").show(ui, |ui| self.style.ui(ui));
+                    ui.add_space(8.0);
+                }
+                let style = self.style.to_style(ui);
+                let columns = ((ui.available_width() / 300.0) as usize).clamp(1, 3);
+                ui.columns(columns, |cols| {
+                    // Sections are dealt out so the columns end up about
+                    // equally tall.
+                    // Columns for: icons and dropdown, width, fields.
+                    let (b, c, d) = match columns {
+                        1 => (0, 0, 0),
+                        2 => (0, 1, 1),
+                        _ => (1, 1, 2),
+                    };
+                    self.toggles(&mut cols[0], &style);
+                    self.exclusive(&mut cols[0], &style);
+                    self.radio(&mut cols[0], &style);
+                    self.icons(&mut cols[b], &style);
+                    self.dropdown(&mut cols[b], &style);
+                    self.width(&mut cols[c], &style);
+                    self.fields(&mut cols[d], &style);
+                });
+            });
+    }
 
-        ui.heading("Toggles");
-        ui.label("Press and drag across the buttons.");
+    fn toggles(&mut self, ui: &mut Ui, style: &GroupStyle) {
+        section(ui, "Toggles", "Press and drag across the buttons.");
         ui.add(
             ToggleGroup::new("visibility")
                 .style(style.clone())
                 .cells(["Solid", "Wire", "Axes", "Grid"], &mut self.visibility)
                 .equal_width(),
         );
-        ui.add_space(8.0);
+        ui.add_space(GAP);
         ui.add(
             ToggleGroup::new("axes")
                 .style(style.clone())
                 .cells(["X", "Y", "Z"], &mut self.axes)
                 .equal_width(),
         );
+    }
 
-        ui.add_space(16.0);
-        ui.heading("Exclusive");
-        ui.label("A press selects one. Hold Shift (long press on touch) to add more.");
+    fn exclusive(&mut self, ui: &mut Ui, style: &GroupStyle) {
+        section(
+            ui,
+            "Exclusive",
+            "A press selects one. Shift (long press on touch) adds more.",
+        );
         ui.add(
             ToggleGroup::new("modes")
                 .style(style.clone())
@@ -97,10 +141,14 @@ impl Demo {
                 .equal_width()
                 .exclusive(true),
         );
+    }
 
-        ui.add_space(16.0);
-        ui.heading("Radio");
-        ui.label("One value: the first always has a selection, the second can be cleared.");
+    fn radio(&mut self, ui: &mut Ui, style: &GroupStyle) {
+        section(
+            ui,
+            "Radio",
+            "One value. The first always has a selection; the second can be cleared.",
+        );
         ui.add(
             RadioGroup::new("shading", &mut self.shading)
                 .style(style.clone())
@@ -109,7 +157,7 @@ impl Demo {
                 .option(Shading::Wire, "Wire")
                 .equal_width(),
         );
-        ui.add_space(8.0);
+        ui.add_space(GAP);
         ui.add(
             RadioGroup::optional("lock_axis", &mut self.lock_axis)
                 .style(style.clone())
@@ -118,10 +166,14 @@ impl Demo {
                 .option(Axis::Z, "Z")
                 .equal_width(),
         );
+    }
 
-        ui.add_space(16.0);
-        ui.heading("Plain icon buttons");
-        ui.label("No active fill: only the icon changes with the state.");
+    fn icons(&mut self, ui: &mut Ui, style: &GroupStyle) {
+        section(
+            ui,
+            "Plain icon buttons",
+            "No active fill: only the icon changes with the state.",
+        );
         let [lock, show, snap] = &mut self.icons;
         ui.add(
             ToggleGroup::new("icons")
@@ -137,10 +189,14 @@ impl Demo {
                 .tooltip("Grid")
                 .highlight_active(false),
         );
+    }
 
-        ui.add_space(16.0);
-        ui.heading("Dropdown");
-        ui.label("A cell that opens a list. Dragging across it skips it.");
+    fn dropdown(&mut self, ui: &mut Ui, style: &GroupStyle) {
+        section(
+            ui,
+            "Dropdown",
+            "A cell that opens a list. Dragging across it skips it.",
+        );
         let [snap, align] = &mut self.snap_on;
         ui.add(
             ToggleGroup::new("dropdown")
@@ -152,7 +208,7 @@ impl Demo {
                     [(SnapMode::Grid, "Grid"), (SnapMode::Vertex, "Vertex")],
                 ),
         );
-        ui.add_space(8.0);
+        ui.add_space(GAP);
         // Options can be an icon and text: any pair of cell contents.
         let option = |mode, icon: Box<dyn CellContent>, text: &'static str| {
             (mode, Box::new((icon, text)) as Box<dyn CellContent>)
@@ -168,32 +224,32 @@ impl Demo {
                     ],
                 ),
         );
+    }
 
-        ui.add_space(16.0);
-        ui.heading("Fields");
-        ui.label("Click to edit. Drag across several to edit them together.");
-        ui.horizontal(|ui| {
-            let [x, y, z] = &mut self.position;
-            ui.add(
-                FieldGroup::new("position")
-                    .style(style.clone())
-                    .labeled("X", x)
-                    .labeled("Y", y)
-                    .labeled("Z", z)
-                    .vertical(),
-            );
-            // The same values again, laid out as a row.
-            let [x, y, z] = &mut self.position;
-            ui.add(
-                FieldGroup::new("row")
-                    .style(style.clone())
-                    .labeled("X", x)
-                    .labeled("Y", y)
-                    .labeled("Z", z),
-            );
-        });
-
-        ui.add_space(8.0);
+    fn fields(&mut self, ui: &mut Ui, style: &GroupStyle) {
+        section(
+            ui,
+            "Fields",
+            "Click to edit. Drag across several to edit them together.",
+        );
+        let [x, y, z] = &mut self.position;
+        ui.add(
+            FieldGroup::new("position")
+                .style(style.clone())
+                .labeled("X", x)
+                .labeled("Y", y)
+                .labeled("Z", z)
+                .vertical(),
+        );
+        ui.add_space(GAP);
+        // The same values again, laid out as a row.
+        ui.add(
+            FieldGroup::new("row")
+                .style(style.clone())
+                .fields(["X", "Y", "Z"], &mut self.position)
+                .cell_width(80.0),
+        );
+        ui.add_space(GAP);
         let [a, b] = &mut self.name;
         ui.add(
             FieldGroup::new("name")
@@ -202,13 +258,11 @@ impl Demo {
                 .field(b)
                 .cell_width(110.0),
         );
-        ui.label(format!("position = {:?}", self.position));
-
+        ui.add_space(GAP);
         // Formatted numbers: fixed decimals, a range and a unit suffix.
         let [w, h] = &mut self.size;
         let mut w = Number::new(w).precision(1).range(0.0..=500.0).suffix(" px");
         let mut h = Number::new(h).precision(1).range(0.0..=500.0).suffix(" px");
-        ui.add_space(8.0);
         ui.add(
             FieldGroup::new("size")
                 .style(style.clone())
@@ -216,40 +270,57 @@ impl Demo {
                 .labeled("H", &mut h)
                 .cell_width(110.0),
         );
+    }
 
-        ui.add_space(16.0);
-        ui.heading("Width");
-        ui.label("`fill_width` follows the space available; `width` is fixed.");
-        ui.add(egui::Slider::new(&mut self.panel_width, 160.0..=600.0).text("Panel width"));
-        ui.scope(|ui| {
-            ui.set_max_width(self.panel_width);
-            ui.add(
-                ToggleGroup::new("fill_toggles")
-                    .style(style.clone())
-                    .cells(["X", "Y", "Z"], &mut self.axes)
-                    .fill_width(),
-            );
-            ui.add_space(8.0);
-            let [x, y, z] = &mut self.position;
-            ui.add(
-                FieldGroup::new("fill_fields")
-                    .style(style.clone())
-                    .labeled("X", x)
-                    .labeled("Y", y)
-                    .labeled("Z", z)
-                    .fill_width(),
+    fn width(&mut self, ui: &mut Ui, style: &GroupStyle) {
+        section(
+            ui,
+            "Width",
+            "Fill follows the space available; otherwise the width is fixed.",
+        );
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.fill, "Fill");
+            ui.add_enabled(
+                !self.fill,
+                egui::Slider::new(&mut self.group_width, 100.0..=500.0),
             );
         });
-        ui.add_space(8.0);
-        let [a, b] = &mut self.name;
-        ui.add(
-            FieldGroup::new("fixed_name")
-                .style(style.clone())
-                .field(a)
-                .field(b)
-                .width(200.0),
-        );
+        ui.add_space(GAP);
+        let mut toggles = ToggleGroup::new("width_toggles")
+            .style(style.clone())
+            .cells(["X", "Y", "Z"], &mut self.axes);
+        let [x, y, z] = &mut self.position;
+        let mut fields = FieldGroup::new("width_fields")
+            .style(style.clone())
+            .labeled("X", x)
+            .labeled("Y", y)
+            .labeled("Z", z);
+        if self.fill {
+            toggles = toggles.fill_width();
+            fields = fields.fill_width();
+        } else {
+            toggles = toggles.width(self.group_width);
+            fields = fields.width(self.group_width);
+        }
+        ui.add(toggles);
+        ui.add_space(GAP);
+        ui.add(fields);
     }
+}
+
+/// Space between two groups of one section.
+const GAP: f32 = 6.0;
+
+fn title(ui: &mut Ui, text: &str) {
+    ui.label(egui::RichText::new(text).strong().size(15.0));
+}
+
+/// A section's title and one-line hint.
+fn section(ui: &mut Ui, name: &str, hint: &str) {
+    ui.add_space(10.0);
+    title(ui, name);
+    ui.label(egui::RichText::new(hint).weak().small());
+    ui.add_space(4.0);
 }
 
 /// A custom-painted icon: a ring, filled in when `filled`.
@@ -330,60 +401,56 @@ impl StyleEdit {
     }
 
     fn ui(&mut self, ui: &mut Ui) {
-        egui::CollapsingHeader::new("Style")
-            .default_open(true)
-            .show(ui, |ui| {
-                let v = ui.visuals().clone();
-                egui::Grid::new("style").num_columns(2).show(ui, |ui| {
-                    ui.label("Corner radius");
-                    ui.add(egui::Slider::new(&mut self.radius, 0.0..=24.0));
-                    ui.end_row();
-                    ui.label("Padding");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::DragValue::new(&mut self.padding.x).range(0.0..=30.0));
-                        ui.add(egui::DragValue::new(&mut self.padding.y).range(0.0..=30.0));
-                    });
-                    ui.end_row();
-                    ui.label("Outline width");
-                    ui.add(egui::Slider::new(&mut self.outline_width, 0.0..=4.0));
-                    ui.end_row();
-                    ui.label("Divider width");
-                    ui.add(egui::Slider::new(&mut self.divider_width, 0.0..=4.0));
-                    ui.end_row();
-                    let style = "from egui style";
-                    let w = &v.widgets;
-                    color_row(ui, "Fill", &mut self.fill, w.inactive.weak_bg_fill, style);
-                    color_row(
-                        ui,
-                        "Hover fill",
-                        &mut self.hover_fill,
-                        w.hovered.weak_bg_fill,
-                        style,
-                    );
-                    color_row(
-                        ui,
-                        "Active fill",
-                        &mut self.active_fill,
-                        v.selection.bg_fill,
-                        style,
-                    );
-                    color_row(ui, "Text", &mut self.text, w.inactive.text_color(), style);
-                    color_row(
-                        ui,
-                        "Active text",
-                        &mut self.active_text,
-                        w.active.text_color(),
-                        style,
-                    );
-                    let border = w.noninteractive.bg_stroke.color;
-                    color_row(ui, "Outline", &mut self.outline, border, style);
-                    let outline = self.outline.unwrap_or(border);
-                    color_row(ui, "Divider", &mut self.divider, outline, "same as outline");
-                });
-                if ui.button("Reset").clicked() {
-                    *self = Self::default();
-                }
+        let v = ui.visuals().clone();
+        egui::Grid::new("style").num_columns(2).show(ui, |ui| {
+            ui.label("Corner radius");
+            ui.add(egui::Slider::new(&mut self.radius, 0.0..=24.0));
+            ui.end_row();
+            ui.label("Padding");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut self.padding.x).range(0.0..=30.0));
+                ui.add(egui::DragValue::new(&mut self.padding.y).range(0.0..=30.0));
             });
+            ui.end_row();
+            ui.label("Outline width");
+            ui.add(egui::Slider::new(&mut self.outline_width, 0.0..=4.0));
+            ui.end_row();
+            ui.label("Divider width");
+            ui.add(egui::Slider::new(&mut self.divider_width, 0.0..=4.0));
+            ui.end_row();
+            let style = "from egui";
+            let w = &v.widgets;
+            color_row(ui, "Fill", &mut self.fill, w.inactive.weak_bg_fill, style);
+            color_row(
+                ui,
+                "Hover fill",
+                &mut self.hover_fill,
+                w.hovered.weak_bg_fill,
+                style,
+            );
+            color_row(
+                ui,
+                "Active fill",
+                &mut self.active_fill,
+                v.selection.bg_fill,
+                style,
+            );
+            color_row(ui, "Text", &mut self.text, w.inactive.text_color(), style);
+            color_row(
+                ui,
+                "Active text",
+                &mut self.active_text,
+                w.active.text_color(),
+                style,
+            );
+            let border = w.noninteractive.bg_stroke.color;
+            color_row(ui, "Outline", &mut self.outline, border, style);
+            let outline = self.outline.unwrap_or(border);
+            color_row(ui, "Divider", &mut self.divider, outline, "same as outline");
+        });
+        if ui.button("Reset").clicked() {
+            *self = Self::default();
+        }
     }
 }
 
