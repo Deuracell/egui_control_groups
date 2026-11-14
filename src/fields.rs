@@ -88,7 +88,7 @@ struct Entry<'a> {
     value: &'a mut dyn FieldValue,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 struct State {
     /// Cell the pointer went down on, while the button is held.
     press: Option<usize>,
@@ -122,7 +122,7 @@ enum TouchMode {
     Cancelled,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct Edit {
     lo: usize,
     hi: usize,
@@ -157,6 +157,8 @@ struct Edit {
 /// * Click a field to edit it. All text is selected; Enter or clicking away
 ///   commits, Escape cancels. On a touch screen, where there is no Escape,
 ///   tapping away cancels instead and only Enter commits.
+/// * Tab commits the field being edited and opens the next one (Shift+Tab the
+///   previous one). At the last or first field it just commits and leaves.
 /// * Press in one field and drag across others to select several. The
 ///   selected fields are highlighted; type a value and commit to write it to
 ///   every one of them.
@@ -198,6 +200,27 @@ impl<'a> FieldGroup<'a> {
             label: Some(label.into()),
             value,
         });
+        self
+    }
+
+    /// Append one field per `(label, value)` pair, so a slice or array can be
+    /// edited without destructuring it.
+    ///
+    /// In debug builds, panics if `labels` and `values` differ in length.
+    pub fn fields<T: FieldValue + 'a>(
+        mut self,
+        labels: impl IntoIterator<Item = impl Into<WidgetText>>,
+        values: &'a mut [T],
+    ) -> Self {
+        let labels: Vec<WidgetText> = labels.into_iter().map(Into::into).collect();
+        debug_assert_eq!(
+            labels.len(),
+            values.len(),
+            "FieldGroup::fields: labels and values must have the same length"
+        );
+        for (label, value) in labels.into_iter().zip(values.iter_mut()) {
+            self = self.labeled(label, value);
+        }
         self
     }
 
@@ -283,14 +306,26 @@ impl Widget for FieldGroup<'_> {
             }
         };
         let (group_rect, mut response) = ui.allocate_exact_size(total, Sense::hover());
+
+        let mut state: State = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+        // Out of view and nothing in progress: the space is allocated, but
+        // there is nothing to lay out, paint or interact with.
+        if !ui.is_rect_visible(group_rect)
+            && state.edit.is_none()
+            && state.press.is_none()
+            && !ui.memory(|m| (0..n).any(|i| m.has_focus(id.with(i))))
+        {
+            return response;
+        }
         let cells = layout_cells(group_rect.min, &mains, cross, orientation);
         let responses: Vec<Response> = cells
             .iter()
             .enumerate()
             .map(|(i, r)| ui.interact(*r, id.with(i), Sense::click_and_drag()))
             .collect();
-
-        let mut state: State = ui.data(|d| d.get_temp(id)).unwrap_or_default();
+        // Idle state is small and cheap to compare; an active edit is always
+        // written back, as its buffer is changing anyway.
+        let before = state.edit.is_none().then(|| state.clone());
         let mut changed = false;
 
         // Reserve a paint slot below the text editor, filled in at the end.
@@ -308,6 +343,7 @@ impl Widget for FieldGroup<'_> {
 
         // 1. The live text editor, if a session is active.
         let mut finish: Option<bool> = None;
+        let mut tab_to: Option<usize> = None;
         if let Some(edit) = state.edit.as_mut() {
             edit.touch |= touch_now;
             if edit.fresh {
@@ -331,11 +367,37 @@ impl Widget for FieldGroup<'_> {
                 .margin(Margin::ZERO)
                 .horizontal_align(Align::Center)
                 .desired_width(area.width());
+            let editor = if n > 1 {
+                editor.event_filter(egui::EventFilter {
+                    tab: true,
+                    ..Default::default()
+                })
+            } else {
+                editor
+            };
             let out = ui.place(area, editor);
             let (escape, enter) =
                 ui.input(|i| (i.key_pressed(Key::Escape), i.key_pressed(Key::Enter)));
+            // Tab (Shift+Tab) moves to the neighbouring field. egui's focus
+            // navigation is kept away from it by the editor's event filter
+            // above. Past either end the editor just commits and lets go.
+            let tab = if edit.fresh || !out.has_focus() {
+                None
+            } else if ui.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::Tab)) {
+                Some(edit.lo.checked_sub(1))
+            } else if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab)) {
+                Some(Some(edit.hi + 1).filter(|&i| i < n))
+            } else {
+                None
+            };
             if edit.fresh {
                 edit.fresh = false;
+            } else if let Some(next) = tab {
+                finish = Some(true);
+                tab_to = next;
+                if next.is_none() {
+                    ui.memory_mut(|m| m.surrender_focus(te_id));
+                }
             } else if escape {
                 finish = Some(false);
             } else if out.lost_focus() {
@@ -354,6 +416,16 @@ impl Widget for FieldGroup<'_> {
                         changed |= entry.value.to_field_text() != before;
                     }
                 }
+            }
+            if let Some(next) = tab_to {
+                state.edit = Some(Edit {
+                    lo: next,
+                    hi: next,
+                    host: next,
+                    buffer: entries[next].value.to_field_text(),
+                    fresh: true,
+                    touch: false,
+                });
             }
             ui.ctx().request_repaint();
         }
@@ -533,18 +605,14 @@ impl Widget for FieldGroup<'_> {
             let cell = cells[i];
             // Text never leaves its own cell.
             let painter = ui.painter_at(cell);
-            let value_text = entries[i].value.to_field_text();
             let label = entries[i].label.take();
             let enabled = ui.is_enabled();
-            let label_text = label.as_ref().map(|l| l.text().to_owned());
+            let value = &*entries[i].value;
+            let label_text = label.as_ref().map(|l| l.text());
             responses[i].widget_info(|| {
-                let mut info = WidgetInfo::text_edit(
-                    enabled,
-                    value_text.clone(),
-                    value_text.clone(),
-                    String::new(),
-                );
-                info.label = label_text.clone();
+                let text = value.to_field_text();
+                let mut info = WidgetInfo::text_edit(enabled, text.clone(), text, String::new());
+                info.label = label_text.map(str::to_owned);
                 info
             });
             if responses[i].has_focus() {
@@ -572,9 +640,9 @@ impl Widget for FieldGroup<'_> {
                 .edit
                 .as_ref()
                 .filter(|e| (e.lo..=e.hi).contains(&i))
-                .map(|e| e.buffer.clone());
+                .map(|e| e.buffer.as_str());
             let mirror_active = mirrored.is_some();
-            let text = mirrored.unwrap_or(value_text);
+            let text = mirrored.map_or_else(|| value.to_field_text(), str::to_owned);
             let galley = make_galley(ui, text.into());
             if mirror_active && all_selected {
                 let r =
@@ -584,7 +652,9 @@ impl Widget for FieldGroup<'_> {
             painter.add(centered_galley(cell, &galley, st.text));
         }
 
-        ui.data_mut(|d| d.insert_temp(id, state));
+        if before.as_ref() != Some(&state) {
+            ui.data_mut(|d| d.insert_temp(id, state));
+        }
         if changed {
             response.mark_changed();
         }
