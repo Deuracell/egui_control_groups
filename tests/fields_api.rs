@@ -1,7 +1,7 @@
 //! Tab navigation and the bulk constructor of `FieldGroup`.
 
 use egui::{Context, Event, Key, Modifiers, PointerButton, Pos2, RawInput, Rect, Ui, pos2, vec2};
-use egui_control_groups::FieldGroup;
+use egui_control_groups::{FieldGroup, TabBehavior};
 
 struct Fields {
     ctx: Context,
@@ -45,7 +45,7 @@ impl Fields {
                 let [a, b, c] = vals;
                 FieldGroup::new("f").field(a).field(b).field(c)
             };
-            let r = ui.add(g.cell_width(80.0));
+            let r = ui.add(g.cell_width(80.0).tab_behavior(TabBehavior::Stop));
             rect = r.rect;
             changed = r.changed();
         });

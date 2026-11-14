@@ -16,13 +16,15 @@
 mod content;
 mod fields;
 mod geometry;
+mod number;
 mod paint;
 mod style;
 mod toggle;
 mod width;
 
 pub use content::{CellContent, Icon, PaintCell};
-pub use fields::{FieldGroup, FieldValue};
+pub use fields::{FieldGroup, FieldValue, TabBehavior};
 pub use geometry::Orientation;
+pub use number::{Number, NumberValue};
 pub use style::GroupStyle;
 pub use toggle::ToggleGroup;

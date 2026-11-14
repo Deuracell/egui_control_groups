@@ -1,7 +1,7 @@
 //! The demo UI, shared by the native example and the web demo.
 
 use egui::{Color32, Stroke, Ui, Vec2, vec2};
-use egui_control_groups::{FieldGroup, GroupStyle, PaintCell, ToggleGroup};
+use egui_control_groups::{FieldGroup, GroupStyle, Number, PaintCell, ToggleGroup};
 
 pub struct Demo {
     style: StyleEdit,
@@ -11,6 +11,7 @@ pub struct Demo {
     icons: [bool; 3],
     grid: bool,
     position: [f32; 3],
+    size: [f32; 2],
     name: [String; 2],
     panel_width: f32,
 }
@@ -25,6 +26,7 @@ impl Default for Demo {
             icons: [true, false, true],
             grid: false,
             position: [0.0, 1.5, -2.0],
+            size: [64.0, 32.5],
             name: [String::from("Part"), String::from("A")],
             panel_width: 360.0,
         }
@@ -117,6 +119,19 @@ impl Demo {
                 .cell_width(110.0),
         );
         ui.label(format!("position = {:?}", self.position));
+
+        // Formatted numbers: fixed decimals, a range and a unit suffix.
+        let [w, h] = &mut self.size;
+        let mut w = Number::new(w).precision(1).range(0.0..=500.0).suffix(" px");
+        let mut h = Number::new(h).precision(1).range(0.0..=500.0).suffix(" px");
+        ui.add_space(8.0);
+        ui.add(
+            FieldGroup::new("size")
+                .style(style.clone())
+                .labeled("W", &mut w)
+                .labeled("H", &mut h)
+                .cell_width(110.0),
+        );
 
         ui.add_space(16.0);
         ui.heading("Width");
