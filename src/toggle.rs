@@ -29,8 +29,8 @@ enum Mode {
     Paint(bool),
     /// Exclusive mode: the cell under the pointer becomes the only one on.
     Move,
-    /// Touch in exclusive mode, not yet decided: a tap selects, a long press
-    /// extends, moving to another cell moves the selection.
+    /// Touch, not yet decided: a tap acts on release, moving to another cell
+    /// starts a drag, and in an exclusive group a long press extends.
     Pending { start: f64, pos: Pos2 },
     /// An extending press that changed nothing (it would have switched off
     /// the last active cell); dragging does nothing.
@@ -126,8 +126,11 @@ fn held(have: Modifiers, want: Modifiers) -> bool {
 ///
 /// With [`exclusive`](ToggleGroup::exclusive), a plain press selects only the
 /// pressed cell. Holding the extend modifier (Shift by default) flips cells
-/// without touching the others, as in Blender. On a touch screen a tap
-/// selects and a long press extends.
+/// without touching the others, as in Blender.
+///
+/// On a touch screen nothing happens at the moment of touch: a tap acts on
+/// release, dragging onto another cell starts a drag, and in an exclusive
+/// group a long press extends.
 #[must_use = "Add with `ui.add(...)`."]
 pub struct ToggleGroup<'a> {
     id_salt: Id,
@@ -341,7 +344,12 @@ impl Widget for ToggleGroup<'_> {
                 i.pointer.primary_down(),
                 i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()),
                 i.modifiers,
-                i.any_touches(),
+                // A tap can start and end within one frame, leaving no touch
+                // active at its end, so also look for touch events.
+                i.any_touches()
+                    || i.events
+                        .iter()
+                        .any(|e| matches!(e, egui::Event::Touch { .. })),
                 i.time,
             )
         });
@@ -359,15 +367,17 @@ impl Widget for ToggleGroup<'_> {
 
         if gesture.is_none() {
             if pressed && let Some(i) = responses.iter().position(Response::hovered) {
-                let mode = if !exclusive {
-                    let target = !*values[i];
-                    changed |= set_cell(&mut values, i, target, false);
-                    Mode::Paint(target)
-                } else if touch {
+                let mode = if touch {
+                    // Fingers can't hover and may be starting a scroll, so
+                    // nothing happens until release, a drag or a long press.
                     Mode::Pending {
                         start: now,
                         pos: pointer.unwrap_or_else(|| rects[i].center()),
                     }
+                } else if !exclusive {
+                    let target = !*values[i];
+                    changed |= set_cell(&mut values, i, target, false);
+                    Mode::Paint(target)
                 } else {
                     let (c, mode) = if extending {
                         extend_press(&mut values, i, require_one)
@@ -398,13 +408,28 @@ impl Widget for ToggleGroup<'_> {
                 Mode::Pending { start, pos: origin } => {
                     if idx != g.last {
                         // Moved to another cell: a drag, not a tap.
-                        changed |= select_only(&mut values, idx);
-                        g.mode = Mode::Move;
+                        if exclusive {
+                            changed |= select_only(&mut values, idx);
+                            g.mode = Mode::Move;
+                        } else {
+                            let target = !*values[g.last];
+                            for k in range_between(g.last, idx) {
+                                changed |= set_cell(&mut values, k, target, false);
+                            }
+                            g.mode = Mode::Paint(target);
+                        }
                         g.last = idx;
-                    } else if pos.distance(origin) <= max_dist && now - start >= long_press {
-                        let (c, mode) = extend_press(&mut values, g.last, require_one);
-                        changed |= c;
-                        g.mode = mode;
+                    } else if exclusive && pos.distance(origin) <= max_dist {
+                        if now - start >= long_press {
+                            let (c, mode) = extend_press(&mut values, g.last, require_one);
+                            changed |= c;
+                            g.mode = mode;
+                        } else {
+                            // No input arrives while the finger rests, so ask
+                            // for a frame when the long press is due.
+                            ui.ctx()
+                                .request_repaint_after_secs((long_press - (now - start)) as f32);
+                        }
                     }
                 }
                 Mode::Inert => {}
@@ -417,7 +442,12 @@ impl Widget for ToggleGroup<'_> {
                 last,
             }) = gesture
             {
-                changed |= plain_press(&mut values, last, require_one).0;
+                changed |= if exclusive {
+                    plain_press(&mut values, last, require_one).0
+                } else {
+                    let target = !*values[last];
+                    set_cell(&mut values, last, target, false)
+                };
             }
             gesture = None;
         }
