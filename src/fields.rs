@@ -37,7 +37,7 @@ impl FieldValue for String {
     }
 }
 
-fn format_float(v: f64) -> String {
+pub(crate) fn format_float(v: f64) -> String {
     if !v.is_finite() {
         return v.to_string();
     }
@@ -82,6 +82,26 @@ macro_rules! int_value {
 }
 float_value!(f32, f64);
 int_value!(i8, i16, i32, i64, isize, u8, u16, u32, u64, usize);
+
+/// What Tab (Shift+Tab) does at the last (first) field of a [`FieldGroup`].
+///
+/// Tab between fields inside the group always commits the field being edited
+/// and opens the neighbour. This only decides what happens past either end;
+/// every mode commits first.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TabBehavior {
+    /// Drop keyboard focus and stay put.
+    Stop,
+    /// Hand focus on to the next (previous) widget outside the group, as
+    /// egui's own Tab navigation would. Shift+Tab goes to the widget added
+    /// before the group; if there is none, egui's choice of widget applies.
+    /// The default.
+    #[default]
+    Leave,
+    /// Wrap around: Tab on the last field opens the first, Shift+Tab on the
+    /// first opens the last.
+    Wrap,
+}
 
 struct Entry<'a> {
     label: Option<WidgetText>,
@@ -158,7 +178,10 @@ struct Edit {
 ///   commits, Escape cancels. On a touch screen, where there is no Escape,
 ///   tapping away cancels instead and only Enter commits.
 /// * Tab commits the field being edited and opens the next one (Shift+Tab the
-///   previous one). At the last or first field it just commits and leaves.
+///   previous one). What happens at the last or first field is set with
+///   [`tab_behavior`](FieldGroup::tab_behavior): by default it just commits
+///   and moves focus on to the next (previous) widget, like egui's own Tab
+///   navigation.
 /// * Press in one field and drag across others to select several. The
 ///   selected fields are highlighted; type a value and commit to write it to
 ///   every one of them.
@@ -173,6 +196,7 @@ pub struct FieldGroup<'a> {
     cell_width: Option<f32>,
     width: Width,
     style: GroupStyle,
+    tab_behavior: TabBehavior,
 }
 
 impl<'a> FieldGroup<'a> {
@@ -185,6 +209,7 @@ impl<'a> FieldGroup<'a> {
             cell_width: None,
             width: Width::Auto,
             style: GroupStyle::default(),
+            tab_behavior: TabBehavior::default(),
         }
     }
 
@@ -258,6 +283,12 @@ impl<'a> FieldGroup<'a> {
         self
     }
 
+    /// What Tab does at the ends of the group. Default: [`TabBehavior::Leave`].
+    pub fn tab_behavior(mut self, behavior: TabBehavior) -> Self {
+        self.tab_behavior = behavior;
+        self
+    }
+
     /// Override parts of the look. Anything left unset follows `egui::Style`.
     pub fn style(mut self, style: GroupStyle) -> Self {
         self.style = style;
@@ -274,6 +305,7 @@ impl Widget for FieldGroup<'_> {
             cell_width,
             width,
             style,
+            tab_behavior,
         } = self;
         let n = entries.len();
         if n == 0 {
@@ -315,8 +347,48 @@ impl Widget for FieldGroup<'_> {
             && state.press.is_none()
             && !ui.memory(|m| (0..n).any(|i| m.has_focus(id.with(i))))
         {
+            // Keep the auto ids of later widgets as stable as while editing.
+            ui.skip_ahead_auto_ids(1);
             return response;
         }
+        let te_id = id.with("editor");
+
+        // Tab (Shift+Tab) while editing moves to the neighbouring field. The
+        // editor's event filter (below) keeps egui's own focus navigation
+        // away from it, so the key is handled here, before any cell is
+        // registered: leaving backwards has to hand focus on before the
+        // group's own cells take their place in egui's focus order.
+        // `tab` is `Some(target)` when a Tab press ends the edit, the target
+        // being the field to open next (`None` past an end).
+        let mut tab: Option<Option<usize>> = None;
+        let mut leave_next = false;
+        if let Some(edit) = state.edit.as_ref()
+            && !edit.fresh
+            && ui.memory(|m| m.has_focus(te_id))
+        {
+            let back = ui.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::Tab));
+            let fwd = !back && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab));
+            let wrap = tab_behavior == TabBehavior::Wrap;
+            if back {
+                tab = Some(match edit.lo.checked_sub(1) {
+                    Some(i) => Some(i),
+                    None => wrap.then_some(n - 1),
+                });
+                if tab == Some(None) {
+                    ui.memory_mut(|m| m.surrender_focus(te_id));
+                    if tab_behavior == TabBehavior::Leave {
+                        ui.memory_mut(|m| m.move_focus(egui::FocusDirection::Previous));
+                    }
+                }
+            } else if fwd {
+                tab = Some(match Some(edit.hi + 1).filter(|&i| i < n) {
+                    Some(i) => Some(i),
+                    None => wrap.then_some(0),
+                });
+                leave_next = tab == Some(None) && tab_behavior == TabBehavior::Leave;
+            }
+        }
+
         let cells = layout_cells(group_rect.min, &mains, cross, orientation);
         let responses: Vec<Response> = cells
             .iter()
@@ -330,7 +402,6 @@ impl Widget for FieldGroup<'_> {
 
         // Reserve a paint slot below the text editor, filled in at the end.
         let bg_slot = ui.painter().add(Shape::Noop);
-        let te_id = id.with("editor");
 
         // On the web the pointer event is handled a frame before the touch
         // event, so a touch is only noticed from the frame after the press.
@@ -367,42 +438,35 @@ impl Widget for FieldGroup<'_> {
                 .margin(Margin::ZERO)
                 .horizontal_align(Align::Center)
                 .desired_width(area.width());
-            let editor = if n > 1 {
-                editor.event_filter(egui::EventFilter {
-                    tab: true,
-                    ..Default::default()
-                })
-            } else {
-                editor
-            };
+            let editor = editor.event_filter(egui::EventFilter {
+                tab: true,
+                ..Default::default()
+            });
             let out = ui.place(area, editor);
             let (escape, enter) =
                 ui.input(|i| (i.key_pressed(Key::Escape), i.key_pressed(Key::Enter)));
-            // Tab (Shift+Tab) moves to the neighbouring field. egui's focus
-            // navigation is kept away from it by the editor's event filter
-            // above. Past either end the editor just commits and lets go.
-            let tab = if edit.fresh || !out.has_focus() {
-                None
-            } else if ui.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::Tab)) {
-                Some(edit.lo.checked_sub(1))
-            } else if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Tab)) {
-                Some(Some(edit.hi + 1).filter(|&i| i < n))
-            } else {
-                None
-            };
             if edit.fresh {
                 edit.fresh = false;
             } else if let Some(next) = tab {
                 finish = Some(true);
                 tab_to = next;
                 if next.is_none() {
-                    ui.memory_mut(|m| m.surrender_focus(te_id));
+                    ui.memory_mut(|m| {
+                        m.surrender_focus(te_id);
+                        if leave_next {
+                            m.move_focus(egui::FocusDirection::Next);
+                        }
+                    });
                 }
             } else if escape {
                 finish = Some(false);
             } else if out.lost_focus() {
                 finish = Some(enter || !edit.touch);
             }
+        } else {
+            // The editor is placed in a child `Ui`, which takes one auto id.
+            // Take it here too so later widgets keep their ids across edits.
+            ui.skip_ahead_auto_ids(1);
         }
         if let Some(commit) = finish
             && let Some(edit) = state.edit.take()
