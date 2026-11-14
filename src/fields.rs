@@ -285,13 +285,20 @@ impl Widget for FieldGroup<'_> {
         {
             if commit {
                 for entry in &mut entries[edit.lo..=edit.hi] {
-                    changed |= entry.value.set_from_field_text(&edit.buffer);
+                    // A field already showing this text is left alone: writing
+                    // the displayed (rounded) text back would lose precision.
+                    let before = entry.value.to_field_text();
+                    if before != edit.buffer && entry.value.set_from_field_text(&edit.buffer) {
+                        changed |= entry.value.to_field_text() != before;
+                    }
                 }
             }
             ui.ctx().request_repaint();
         }
 
-        // 2. Press / drag / release while no editor is open.
+        // 2. Press / drag / release while no editor is open. A press on another
+        // cell while an editor is open is remembered as the anchor, so the
+        // release (after the edit has finished) opens that cell right away.
         let (pressed, down, pointer) = ui.input(|i| {
             (
                 i.pointer.primary_pressed(),
@@ -300,7 +307,21 @@ impl Widget for FieldGroup<'_> {
             )
         });
         let mut drag_range: Option<(usize, usize)> = None;
-        if state.edit.is_none() {
+        if let Some(edit) = &state.edit {
+            if state.press.is_none()
+                && pressed
+                && let Some(i) = responses.iter().position(Response::hovered)
+                && i != edit.host
+            {
+                state.press = Some(i);
+            } else if !down {
+                state.press = None;
+                state.press_touch = false;
+            }
+            if state.press.is_some() {
+                state.press_touch |= touch_now;
+            }
+        } else {
             if state.press.is_none()
                 && pressed
                 && let Some(i) = responses.iter().position(Response::hovered)
