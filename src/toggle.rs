@@ -84,7 +84,14 @@ fn plain_press(values: &mut [&mut bool], i: usize, require_one: bool) -> (bool, 
 fn extend_press(values: &mut [&mut bool], i: usize, require_one: bool) -> (bool, Mode) {
     let target = !*values[i];
     let changed = set_cell(values, i, target, require_one);
-    (changed, if changed { Mode::Paint(target) } else { Mode::Inert })
+    (
+        changed,
+        if changed {
+            Mode::Paint(target)
+        } else {
+            Mode::Inert
+        },
+    )
 }
 
 /// Whether every modifier required by `want` is held in `have`.
@@ -338,9 +345,12 @@ impl Widget for ToggleGroup<'_> {
                 i.time,
             )
         });
-        let (long_press, max_dist) = ui
-            .ctx()
-            .options(|o| (o.input_options.max_click_duration, o.input_options.max_click_dist));
+        let (long_press, max_dist) = ui.ctx().options(|o| {
+            (
+                o.input_options.max_click_duration,
+                o.input_options.max_click_dist,
+            )
+        });
         let extending = held(modifiers, extend);
         let mut gesture: Option<Gesture> = ui.data(|d| d.get_temp(id));
         let was_active = gesture.is_some();
