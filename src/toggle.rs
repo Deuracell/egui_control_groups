@@ -15,6 +15,7 @@ use crate::geometry::corner_radius_for;
 use crate::geometry::{Orientation, index_at, layout_cells, range_between};
 use crate::paint::frame_shapes;
 use crate::style::GroupStyle;
+use crate::width::{Width, distribute};
 
 struct Cell<'a> {
     off: Rc<dyn CellContent + 'a>,
@@ -160,6 +161,7 @@ pub struct ToggleGroup<'a> {
     cells: Vec<Cell<'a>>,
     orientation: Orientation,
     equal_size: bool,
+    width: Width,
     highlight_active: bool,
     exclusive: bool,
     require_one: bool,
@@ -176,6 +178,7 @@ impl<'a> ToggleGroup<'a> {
             cells: Vec::new(),
             orientation: Orientation::Horizontal,
             equal_size: false,
+            width: Width::Auto,
             highlight_active: true,
             exclusive: false,
             require_one: false,
@@ -300,8 +303,32 @@ impl<'a> ToggleGroup<'a> {
     }
 
     /// Give every cell the width of the widest one (horizontal groups).
+    ///
+    /// This sets the natural size only: an explicit [`width`](Self::width) or
+    /// [`fill_width`](Self::fill_width) wins, and then scales these equal
+    /// cells, which therefore stay equal.
     pub fn equal_width(mut self) -> Self {
         self.equal_size = true;
+        self
+    }
+
+    /// Make the whole group exactly `width` points wide.
+    ///
+    /// Horizontal groups share the width between their cells in proportion to
+    /// their natural widths (so [`equal_width`](Self::equal_width) cells stay
+    /// equal), down to a small minimum per cell; cells may become narrower
+    /// than `interact_size.x`. Vertical groups get this as their cross-axis
+    /// width. Takes precedence over `equal_width`. A non-finite or negative
+    /// value is ignored. Default: natural size.
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = Width::Fixed(width);
+        self
+    }
+
+    /// Like [`width`](Self::width), using `ui.available_width()`. Falls back
+    /// to the natural size when that is not finite.
+    pub fn fill_width(mut self) -> Self {
+        self.width = Width::Fill;
         self
     }
 
@@ -319,6 +346,7 @@ impl Widget for ToggleGroup<'_> {
             cells,
             orientation,
             equal_size,
+            width,
             highlight_active,
             exclusive,
             require_one,
@@ -354,7 +382,8 @@ impl Widget for ToggleGroup<'_> {
         let min = ui.spacing().interact_size;
         let max_w = content.iter().map(|s| s.x).fold(min.x, f32::max);
         let max_h = content.iter().map(|s| s.y).fold(min.y, f32::max);
-        let (cross, mains): (f32, Vec<f32>) = match orientation {
+        let target = width.resolve(ui.available_width());
+        let (cross, mut mains): (f32, Vec<f32>) = match orientation {
             Orientation::Horizontal => (
                 max_h,
                 content
@@ -362,8 +391,11 @@ impl Widget for ToggleGroup<'_> {
                     .map(|s| if equal_size { max_w } else { s.x.max(min.x) })
                     .collect(),
             ),
-            Orientation::Vertical => (max_w, vec![max_h; n]),
+            Orientation::Vertical => (target.unwrap_or(max_w), vec![max_h; n]),
         };
+        if let (Some(target), Orientation::Horizontal) = (target, orientation) {
+            mains = distribute(&mains, target, (pad.x * 2.0).max(4.0));
+        }
         let total_main: f32 = mains.iter().sum();
         let total = match orientation {
             Orientation::Horizontal => vec2(total_main, cross),
