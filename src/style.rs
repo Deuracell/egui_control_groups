@@ -117,9 +117,10 @@ mod tests {
 
     fn resolve(style: GroupStyle) -> Resolved {
         let mut out = None;
-        egui::Context::default().run_ui(egui::RawInput::default(), |ui| {
+        let output = egui::Context::default().run_ui(egui::RawInput::default(), |ui| {
             out = Some(style.resolve(ui));
         });
+        output.drop_without_applying_deltas();
         out.unwrap()
     }
 
