@@ -465,6 +465,12 @@ impl<'a> ToggleGroup<'a> {
     }
 
     /// Stack the cells top to bottom instead of left to right.
+    ///
+    /// If any cell has an icon before its text (a pair such as
+    /// `(icon, "Snap")`), the column is laid out like a list: the icons share
+    /// one column as wide as the widest and the text is left-aligned after
+    /// it, so it lines up whatever the icons' sizes. Otherwise each cell's
+    /// content is centred, as in a row.
     pub fn vertical(mut self) -> Self {
         self.orientation = Orientation::Vertical;
         self
@@ -550,6 +556,28 @@ impl Widget for ToggleGroup<'_> {
         let is_toggle: Vec<bool> = values.iter().map(Option::is_some).collect();
         let (caret, caret_gap) = (caret_size(ui), ui.spacing().icon_spacing);
 
+        // A column of cells with icons is laid out like a list: one column
+        // for the icons, as wide as the widest, and the text left-aligned
+        // after it, so it lines up down the group whatever the icons' sizes.
+        // Zero (cells centred, each on its own) for a row, or without icons.
+        let icon_column = match orientation {
+            Orientation::Horizontal => 0.0,
+            Orientation::Vertical => contents
+                .iter()
+                .flat_map(|c| match c {
+                    Content::Toggle { off, on } => {
+                        vec![off.leading_width(ui), on.leading_width(ui)]
+                    }
+                    Content::Dropdown { binding, .. } => binding
+                        .options()
+                        .iter()
+                        .map(|o| o.leading_width(ui))
+                        .collect(),
+                })
+                .flatten()
+                .fold(0.0, f32::max),
+        };
+
         // Sizes: each cell fits the larger of its two states, or the widest
         // option of a dropdown.
         let pad = st.padding;
@@ -557,12 +585,18 @@ impl Widget for ToggleGroup<'_> {
             .iter()
             .map(|c| {
                 let size = match c {
+                    Content::Toggle { off, on } if icon_column > 0.0 => {
+                        let (a, b) = (off.size(ui), on.size(ui));
+                        let width = columns_width(off.as_ref(), ui, icon_column)
+                            .max(columns_width(on.as_ref(), ui, icon_column));
+                        vec2(width, a.y.max(b.y))
+                    }
                     // `cell()` shares one Rc between both states: measure once.
                     Content::Toggle { off, on } if Rc::ptr_eq(off, on) => off.size(ui),
                     Content::Toggle { off, on } => off.size(ui).max(on.size(ui)),
                     Content::Dropdown { binding, .. } => {
                         let options = binding.options();
-                        let (_, width) = option_columns(ui, options);
+                        let (_, width) = option_columns(ui, options, icon_column);
                         let height = options.iter().fold(caret.y, |h, o| h.max(o.size(ui).y));
                         vec2(width + caret_gap + caret.x, height)
                     }
@@ -911,7 +945,12 @@ impl Widget for ToggleGroup<'_> {
                         st.text
                     };
                     let shown = if on_now { on } else { off };
-                    shown.paint(ui, rects[i], color);
+                    if icon_column > 0.0 {
+                        let inner = rects[i].shrink2(vec2(pad.x, 0.0));
+                        shown.paint_in_columns(ui, inner, color, icon_column);
+                    } else {
+                        shown.paint(ui, rects[i], color);
+                    }
                 }
                 Content::Dropdown { binding, selected } => {
                     // The caret sits at the right edge; the selected option
@@ -928,7 +967,7 @@ impl Widget for ToggleGroup<'_> {
                         );
                         // Left-aligned in the list's columns, so the content
                         // stays put whichever option is chosen.
-                        let (column, _) = option_columns(ui, binding.options());
+                        let (column, _) = option_columns(ui, binding.options(), icon_column);
                         binding.options()[s].paint_in_columns(ui, room, st.text, column);
                     }
                     paint_caret(ui, caret_rect, st.text);
@@ -951,7 +990,14 @@ impl Widget for ToggleGroup<'_> {
         // Dropdown lists.
         for i in (0..n).filter(|&i| !is_toggle[i]) {
             if let Content::Dropdown { binding, selected } = &mut contents[i]
-                && let Some(chosen) = show_list(ui, &responses[i], binding.as_ref(), *selected, &st)
+                && let Some(chosen) = show_list(
+                    ui,
+                    &responses[i],
+                    binding.as_ref(),
+                    *selected,
+                    &st,
+                    icon_column,
+                )
                 && *selected != Some(chosen)
             {
                 binding.select(chosen);
@@ -968,11 +1014,14 @@ impl Widget for ToggleGroup<'_> {
 
 /// The leading column shared by `options` (as wide as the widest leading
 /// part, such as an icon) and the width of the widest option laid out in it.
-fn option_columns(ui: &Ui, options: &[Rc<dyn CellContent + '_>]) -> (f32, f32) {
+///
+/// `min_column` is the column of the group the options belong to, when its
+/// cells are laid out in columns too.
+fn option_columns(ui: &Ui, options: &[Rc<dyn CellContent + '_>], min_column: f32) -> (f32, f32) {
     let column = options
         .iter()
         .filter_map(|o| o.leading_width(ui))
-        .fold(0.0, f32::max);
+        .fold(min_column, f32::max);
     let width = options
         .iter()
         .map(|o| columns_width(o.as_ref(), ui, column))
@@ -1003,6 +1052,7 @@ fn show_list(
     binding: &dyn DropdownBinding<'_>,
     selected: Option<usize>,
     st: &Resolved,
+    min_column: f32,
 ) -> Option<usize> {
     let popup_id = Popup::default_response_id(r);
     let was_open = Popup::is_id_open(ui.ctx(), popup_id);
@@ -1010,7 +1060,7 @@ fn show_list(
     let options = binding.options();
     let pad = st.padding;
     let min_row_h = ui.spacing().interact_size.y;
-    let (column, widest) = option_columns(ui, options);
+    let (column, widest) = option_columns(ui, options, min_column);
     let mut chosen = None;
 
     Popup::menu(r)
