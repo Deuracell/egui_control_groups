@@ -158,6 +158,16 @@ impl Demo {
                 .equal_width(),
         );
         ui.add_space(GAP);
+        // A column with icons: the icons share one column, the text lines up.
+        ui.add(
+            RadioGroup::new("shading_column", &mut self.shading)
+                .style(style.clone())
+                .option(Shading::Flat, (ring(false), "Flat"))
+                .option(Shading::Smooth, (ring(true), "Smooth"))
+                .option(Shading::Wire, (square(false), "Wire"))
+                .vertical(),
+        );
+        ui.add_space(GAP);
         ui.add(
             RadioGroup::optional("lock_axis", &mut self.lock_axis)
                 .style(style.clone())
