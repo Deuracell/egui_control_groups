@@ -11,7 +11,7 @@ use egui::{
     Vec2, Widget, WidgetInfo, WidgetType, pos2, vec2,
 };
 
-use crate::content::CellContent;
+use crate::content::{CellContent, columns_width};
 use crate::geometry::corner_radius_for;
 use crate::geometry::{Orientation, index_at, layout_cells, range_between};
 use crate::paint::frame_shapes;
@@ -561,11 +561,10 @@ impl Widget for ToggleGroup<'_> {
                     Content::Toggle { off, on } if Rc::ptr_eq(off, on) => off.size(ui),
                     Content::Toggle { off, on } => off.size(ui).max(on.size(ui)),
                     Content::Dropdown { binding, .. } => {
-                        let widest = binding
-                            .options()
-                            .iter()
-                            .fold(Vec2::ZERO, |acc, o| acc.max(o.size(ui)));
-                        vec2(widest.x + caret_gap + caret.x, widest.y.max(caret.y))
+                        let options = binding.options();
+                        let (_, width) = option_columns(ui, options);
+                        let height = options.iter().fold(caret.y, |h, o| h.max(o.size(ui).y));
+                        vec2(width + caret_gap + caret.x, height)
                     }
                 };
                 size + pad * 2.0
@@ -927,7 +926,10 @@ impl Widget for ToggleGroup<'_> {
                             inner.min,
                             pos2(caret_rect.left() - caret_gap, inner.max.y),
                         );
-                        binding.options()[s].paint(ui, room, st.text);
+                        // Left-aligned in the list's columns, so the content
+                        // stays put whichever option is chosen.
+                        let (column, _) = option_columns(ui, binding.options());
+                        binding.options()[s].paint_in_columns(ui, room, st.text, column);
                     }
                     paint_caret(ui, caret_rect, st.text);
                 }
@@ -964,6 +966,20 @@ impl Widget for ToggleGroup<'_> {
     }
 }
 
+/// The leading column shared by `options` (as wide as the widest leading
+/// part, such as an icon) and the width of the widest option laid out in it.
+fn option_columns(ui: &Ui, options: &[Rc<dyn CellContent + '_>]) -> (f32, f32) {
+    let column = options
+        .iter()
+        .filter_map(|o| o.leading_width(ui))
+        .fold(0.0, f32::max);
+    let width = options
+        .iter()
+        .map(|o| columns_width(o.as_ref(), ui, column))
+        .fold(0.0, f32::max);
+    (column, width)
+}
+
 /// Size of the caret painted in a dropdown cell.
 fn caret_size(ui: &Ui) -> Vec2 {
     let h = ui.text_style_height(&TextStyle::Button);
@@ -994,7 +1010,7 @@ fn show_list(
     let options = binding.options();
     let pad = st.padding;
     let min_row_h = ui.spacing().interact_size.y;
-    let widest = options.iter().fold(0.0_f32, |w, o| w.max(o.size(ui).x));
+    let (column, widest) = option_columns(ui, options);
     let mut chosen = None;
 
     Popup::menu(r)
@@ -1047,9 +1063,9 @@ fn show_list(
                     } else {
                         ui.visuals().widgets.inactive.text_color()
                     };
-                    // Left-aligned, so icons in an icon-and-text list line up.
-                    let at = pos2(rect.left() + pad.x, rect.center().y - size.y / 2.0);
-                    option.paint(ui, Rect::from_min_size(at, size), color);
+                    // In the same columns as the closed cell, so icons and
+                    // text line up down the list.
+                    option.paint_in_columns(ui, rect.shrink2(vec2(pad.x, 0.0)), color, column);
                 }
                 if row.clicked() {
                     chosen = Some(k);

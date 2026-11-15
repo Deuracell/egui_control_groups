@@ -31,6 +31,50 @@ pub trait CellContent {
     fn accessible_label(&self) -> Option<String> {
         None
     }
+
+    /// Width of a leading part, such as the icon of an `(icon, text)` pair.
+    ///
+    /// A list of options (a [dropdown](crate::ToggleGroup::dropdown)) reserves
+    /// one column as wide as the widest of these, so that the rest of every
+    /// option starts at the same place whatever the size of its icon.
+    /// `None`, the default, means the content has no such part.
+    fn leading_width(&self, _ui: &Ui) -> Option<f32> {
+        None
+    }
+
+    /// Paint left-aligned in `rect`, for a list of options: the leading part
+    /// (see [`leading_width`](Self::leading_width)) centred in a column
+    /// `column` points wide, and the rest after it.
+    ///
+    /// The default suits content without a leading part: it is painted whole
+    /// after the column, in line with the other options' text.
+    fn paint_in_columns(&self, ui: &Ui, rect: Rect, color: Color32, column: f32) {
+        let size = self.size(ui);
+        let at = pos2(
+            rect.left() + column_offset(ui, column),
+            rect.center().y - size.y / 2.0,
+        );
+        self.paint(ui, Rect::from_min_size(at, size), color);
+    }
+}
+
+/// Where content without a leading part starts, past a leading column.
+fn column_offset(ui: &Ui, column: f32) -> f32 {
+    if column > 0.0 {
+        column + ui.spacing().icon_spacing
+    } else {
+        0.0
+    }
+}
+
+/// Width `content` takes when painted with
+/// [`paint_in_columns`](CellContent::paint_in_columns).
+pub(crate) fn columns_width(content: &dyn CellContent, ui: &Ui, column: f32) -> f32 {
+    let width = content.size(ui).x;
+    match content.leading_width(ui) {
+        Some(leading) => column + width - leading,
+        None => column_offset(ui, column) + width,
+    }
 }
 
 fn text_size(ui: &Ui, text: &WidgetText) -> Vec2 {
@@ -82,6 +126,12 @@ impl<T: CellContent> CellContent for &T {
     fn accessible_label(&self) -> Option<String> {
         (**self).accessible_label()
     }
+    fn leading_width(&self, ui: &Ui) -> Option<f32> {
+        (**self).leading_width(ui)
+    }
+    fn paint_in_columns(&self, ui: &Ui, rect: Rect, color: Color32, column: f32) {
+        (**self).paint_in_columns(ui, rect, color, column);
+    }
 }
 
 /// Boxed content, including `Box<dyn CellContent>` for mixed collections.
@@ -95,11 +145,20 @@ impl<T: CellContent + ?Sized> CellContent for Box<T> {
     fn accessible_label(&self) -> Option<String> {
         (**self).accessible_label()
     }
+    fn leading_width(&self, ui: &Ui) -> Option<f32> {
+        (**self).leading_width(ui)
+    }
+    fn paint_in_columns(&self, ui: &Ui, rect: Rect, color: Color32, column: f32) {
+        (**self).paint_in_columns(ui, rect, color, column);
+    }
 }
 
 /// Two contents side by side, `A` on the left and `B` on the right, centred
 /// vertically and separated by `spacing().icon_spacing`. This is how a cell
 /// shows an icon and a label, for example `(Icon::new(image), "Snap")`.
+///
+/// In a list of options (a dropdown) the first part gets a column of its own,
+/// as wide as the widest among the options, so the second parts line up.
 ///
 /// Both parts are painted in the colour the group picked. The accessible
 /// label is the parts' labels joined with a space (or whichever one has one).
@@ -125,6 +184,23 @@ impl<A: CellContent, B: CellContent> CellContent for (A, B) {
             (Some(a), Some(b)) => Some(format!("{a} {b}")),
             (a, b) => a.or(b),
         }
+    }
+
+    fn leading_width(&self, ui: &Ui) -> Option<f32> {
+        Some(self.0.size(ui).x)
+    }
+
+    fn paint_in_columns(&self, ui: &Ui, rect: Rect, color: Color32, column: f32) {
+        let (a, b) = (self.0.size(ui), self.1.size(ui));
+        let column = column.max(a.x);
+        let cy = rect.center().y;
+        let a_at = pos2(rect.left() + (column - a.x) / 2.0, cy - a.y / 2.0);
+        let b_at = pos2(
+            rect.left() + column + ui.spacing().icon_spacing,
+            cy - b.y / 2.0,
+        );
+        self.0.paint(ui, Rect::from_min_size(a_at, a), color);
+        self.1.paint(ui, Rect::from_min_size(b_at, b), color);
     }
 }
 
