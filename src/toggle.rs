@@ -5,12 +5,13 @@
 use std::hash::Hash;
 use std::rc::Rc;
 
+use egui::style::ScrollAnimation;
 use egui::{
     Color32, Id, Key, Modifiers, Popup, Pos2, Rect, Response, Sense, Shape, Stroke, TextStyle, Ui,
     Vec2, Widget, WidgetInfo, WidgetType, pos2, vec2,
 };
 
-use crate::content::CellContent;
+use crate::content::{CellContent, columns_width};
 use crate::geometry::corner_radius_for;
 use crate::geometry::{Orientation, index_at, layout_cells, range_between};
 use crate::paint::frame_shapes;
@@ -99,9 +100,15 @@ enum Mode {
     /// Touch, not yet decided: a tap acts on release, moving to another cell
     /// starts a drag, and in an exclusive group a long press extends.
     Pending { start: f64, pos: Pos2 },
+    /// Touch that has moved along the group but is still on the cell it began
+    /// on: no longer a tap or a long press, and a drag once it reaches
+    /// another cell.
+    Armed,
+    /// Touch that moved across the group instead of along it: a swipe, which
+    /// scrolls the surrounding scroll area and leaves the cells alone.
+    Scroll,
     /// The rest of the gesture does nothing: an extending press that changed
-    /// nothing (it would have switched off the last active cell), or a touch
-    /// that strayed too far from where it began to be a tap.
+    /// nothing (it would have switched off the last active cell).
     Inert,
 }
 
@@ -458,6 +465,12 @@ impl<'a> ToggleGroup<'a> {
     }
 
     /// Stack the cells top to bottom instead of left to right.
+    ///
+    /// If any cell has an icon before its text (a pair such as
+    /// `(icon, "Snap")`), the column is laid out like a list: the icons share
+    /// one column as wide as the widest and the text is left-aligned after
+    /// it, so it lines up whatever the icons' sizes. Otherwise each cell's
+    /// content is centred, as in a row.
     pub fn vertical(mut self) -> Self {
         self.orientation = Orientation::Vertical;
         self
@@ -543,6 +556,28 @@ impl Widget for ToggleGroup<'_> {
         let is_toggle: Vec<bool> = values.iter().map(Option::is_some).collect();
         let (caret, caret_gap) = (caret_size(ui), ui.spacing().icon_spacing);
 
+        // A column of cells with icons is laid out like a list: one column
+        // for the icons, as wide as the widest, and the text left-aligned
+        // after it, so it lines up down the group whatever the icons' sizes.
+        // Zero (cells centred, each on its own) for a row, or without icons.
+        let icon_column = match orientation {
+            Orientation::Horizontal => 0.0,
+            Orientation::Vertical => contents
+                .iter()
+                .flat_map(|c| match c {
+                    Content::Toggle { off, on } => {
+                        vec![off.leading_width(ui), on.leading_width(ui)]
+                    }
+                    Content::Dropdown { binding, .. } => binding
+                        .options()
+                        .iter()
+                        .map(|o| o.leading_width(ui))
+                        .collect(),
+                })
+                .flatten()
+                .fold(0.0, f32::max),
+        };
+
         // Sizes: each cell fits the larger of its two states, or the widest
         // option of a dropdown.
         let pad = st.padding;
@@ -550,15 +585,20 @@ impl Widget for ToggleGroup<'_> {
             .iter()
             .map(|c| {
                 let size = match c {
+                    Content::Toggle { off, on } if icon_column > 0.0 => {
+                        let (a, b) = (off.size(ui), on.size(ui));
+                        let width = columns_width(off.as_ref(), ui, icon_column)
+                            .max(columns_width(on.as_ref(), ui, icon_column));
+                        vec2(width, a.y.max(b.y))
+                    }
                     // `cell()` shares one Rc between both states: measure once.
                     Content::Toggle { off, on } if Rc::ptr_eq(off, on) => off.size(ui),
                     Content::Toggle { off, on } => off.size(ui).max(on.size(ui)),
                     Content::Dropdown { binding, .. } => {
-                        let widest = binding
-                            .options()
-                            .iter()
-                            .fold(Vec2::ZERO, |acc, o| acc.max(o.size(ui)));
-                        vec2(widest.x + caret_gap + caret.x, widest.y.max(caret.y))
+                        let options = binding.options();
+                        let (_, width) = option_columns(ui, options, icon_column);
+                        let height = options.iter().fold(caret.y, |h, o| h.max(o.size(ui).y));
+                        vec2(width + caret_gap + caret.x, height)
                     }
                 };
                 size + pad * 2.0
@@ -590,7 +630,8 @@ impl Widget for ToggleGroup<'_> {
         let frame_nr = ui.ctx().cumulative_frame_nr();
         // Scrolled out of view: the cells stay registered (so Tab reaches them
         // and a focused cell keeps focus and keyboard activation), but nothing
-        // is painted and pointer gestures are dropped.
+        // is painted and pointer gestures are dropped (but for a swipe, which
+        // goes on scrolling).
         let visible = ui.is_rect_visible(group_rect);
         let rects = layout_cells(group_rect.min, &mains, cross, orientation);
         let responses: Vec<Response> = rects
@@ -611,7 +652,7 @@ impl Widget for ToggleGroup<'_> {
         let (pressed, down, pointer, modifiers, touch, now) = ui.input(|i| {
             (
                 visible && i.pointer.primary_pressed(),
-                visible && i.pointer.primary_down(),
+                i.pointer.primary_down(),
                 i.pointer.interact_pos().or_else(|| i.pointer.latest_pos()),
                 i.modifiers,
                 // A tap can start and end within one frame, leaving no touch
@@ -632,9 +673,10 @@ impl Widget for ToggleGroup<'_> {
         let extending = allow_extend && held(modifiers, extend);
         // A gesture not touched last frame belongs to an earlier showing of
         // this group (hidden or culled mid-drag): discard it.
-        let mut gesture: Option<Gesture> = ui
-            .data(|d| d.get_temp::<Gesture>(id))
-            .filter(|g| visible && g.frame.saturating_add(1) >= frame_nr);
+        let mut gesture: Option<Gesture> = ui.data(|d| d.get_temp::<Gesture>(id)).filter(|g| {
+            // A swipe carries on after it has scrolled the group away.
+            (visible || matches!(g.mode, Mode::Scroll)) && g.frame.saturating_add(1) >= frame_nr
+        });
         let was_active = gesture.is_some();
         let mut began = false;
         let mut changed = false;
@@ -713,24 +755,36 @@ impl Widget for ToggleGroup<'_> {
                         g.last = idx;
                     }
                 }
-                Mode::Pending { start, pos: origin } => {
-                    if idx != g.last {
-                        // Moved to another cell: a drag, not a tap.
-                        if exclusive {
-                            changed |= select_only(&mut values, idx);
-                            g.mode = Mode::Move;
-                        } else {
-                            let target = !is_on(&values, g.last);
-                            for k in range_between(g.last, idx) {
-                                changed |= set_cell(&mut values, k, target, false);
-                            }
-                            g.mode = Mode::Paint(target);
+                Mode::Pending { .. } | Mode::Armed if idx != g.last => {
+                    // Moved to another cell: a drag, not a tap.
+                    if exclusive {
+                        changed |= select_only(&mut values, idx);
+                        g.mode = Mode::Move;
+                    } else {
+                        let target = !is_on(&values, g.last);
+                        for k in range_between(g.last, idx) {
+                            changed |= set_cell(&mut values, k, target, false);
                         }
-                        g.last = idx;
-                    } else if pos.distance(origin) > max_dist {
-                        // Wandered off within the same cell (a scroll, say):
-                        // neither a tap nor a long press any more.
-                        g.mode = Mode::Inert;
+                        g.mode = Mode::Paint(target);
+                    }
+                    g.last = idx;
+                }
+                Mode::Pending { start, pos: origin } => {
+                    let moved = pos - origin;
+                    if moved.length() > max_dist {
+                        // Too far for a tap or a long press. A finger crosses
+                        // this long before it reaches the next cell, so tell
+                        // a drag along the group from a swipe across it.
+                        let (along, across) = match orientation {
+                            Orientation::Horizontal => (moved.x, moved.y),
+                            Orientation::Vertical => (moved.y, moved.x),
+                        };
+                        if across.abs() > along.abs() {
+                            g.mode = Mode::Scroll;
+                            ui.scroll_with_delta_animation(moved, ScrollAnimation::none());
+                        } else {
+                            g.mode = Mode::Armed;
+                        }
                     } else if exclusive && allow_extend {
                         if now - start >= long_press {
                             let (c, mode) = extend_press(&mut values, g.last, require_one);
@@ -744,7 +798,13 @@ impl Widget for ToggleGroup<'_> {
                         }
                     }
                 }
-                Mode::Inert => {}
+                Mode::Armed | Mode::Inert => {}
+                Mode::Scroll => {
+                    // Cells take the drag from a scroll area they sit in, so
+                    // pass the swipe on to it.
+                    let delta = ui.input(|i| i.pointer.delta());
+                    ui.scroll_with_delta_animation(delta, ScrollAnimation::none());
+                }
             }
         }
         if !down {
@@ -885,7 +945,12 @@ impl Widget for ToggleGroup<'_> {
                         st.text
                     };
                     let shown = if on_now { on } else { off };
-                    shown.paint(ui, rects[i], color);
+                    if icon_column > 0.0 {
+                        let inner = rects[i].shrink2(vec2(pad.x, 0.0));
+                        shown.paint_in_columns(ui, inner, color, icon_column);
+                    } else {
+                        shown.paint(ui, rects[i], color);
+                    }
                 }
                 Content::Dropdown { binding, selected } => {
                     // The caret sits at the right edge; the selected option
@@ -900,7 +965,10 @@ impl Widget for ToggleGroup<'_> {
                             inner.min,
                             pos2(caret_rect.left() - caret_gap, inner.max.y),
                         );
-                        binding.options()[s].paint(ui, room, st.text);
+                        // Left-aligned in the list's columns, so the content
+                        // stays put whichever option is chosen.
+                        let (column, _) = option_columns(ui, binding.options(), icon_column);
+                        binding.options()[s].paint_in_columns(ui, room, st.text, column);
                     }
                     paint_caret(ui, caret_rect, st.text);
                 }
@@ -922,7 +990,14 @@ impl Widget for ToggleGroup<'_> {
         // Dropdown lists.
         for i in (0..n).filter(|&i| !is_toggle[i]) {
             if let Content::Dropdown { binding, selected } = &mut contents[i]
-                && let Some(chosen) = show_list(ui, &responses[i], binding.as_ref(), *selected, &st)
+                && let Some(chosen) = show_list(
+                    ui,
+                    &responses[i],
+                    binding.as_ref(),
+                    *selected,
+                    &st,
+                    icon_column,
+                )
                 && *selected != Some(chosen)
             {
                 binding.select(chosen);
@@ -935,6 +1010,23 @@ impl Widget for ToggleGroup<'_> {
         }
         response
     }
+}
+
+/// The leading column shared by `options` (as wide as the widest leading
+/// part, such as an icon) and the width of the widest option laid out in it.
+///
+/// `min_column` is the column of the group the options belong to, when its
+/// cells are laid out in columns too.
+fn option_columns(ui: &Ui, options: &[Rc<dyn CellContent + '_>], min_column: f32) -> (f32, f32) {
+    let column = options
+        .iter()
+        .filter_map(|o| o.leading_width(ui))
+        .fold(min_column, f32::max);
+    let width = options
+        .iter()
+        .map(|o| columns_width(o.as_ref(), ui, column))
+        .fold(0.0, f32::max);
+    (column, width)
 }
 
 /// Size of the caret painted in a dropdown cell.
@@ -960,6 +1052,7 @@ fn show_list(
     binding: &dyn DropdownBinding<'_>,
     selected: Option<usize>,
     st: &Resolved,
+    min_column: f32,
 ) -> Option<usize> {
     let popup_id = Popup::default_response_id(r);
     let was_open = Popup::is_id_open(ui.ctx(), popup_id);
@@ -967,7 +1060,7 @@ fn show_list(
     let options = binding.options();
     let pad = st.padding;
     let min_row_h = ui.spacing().interact_size.y;
-    let widest = options.iter().fold(0.0_f32, |w, o| w.max(o.size(ui).x));
+    let (column, widest) = option_columns(ui, options, min_column);
     let mut chosen = None;
 
     Popup::menu(r)
@@ -1020,9 +1113,9 @@ fn show_list(
                     } else {
                         ui.visuals().widgets.inactive.text_color()
                     };
-                    // Left-aligned, so icons in an icon-and-text list line up.
-                    let at = pos2(rect.left() + pad.x, rect.center().y - size.y / 2.0);
-                    option.paint(ui, Rect::from_min_size(at, size), color);
+                    // In the same columns as the closed cell, so icons and
+                    // text line up down the list.
+                    option.paint_in_columns(ui, rect.shrink2(vec2(pad.x, 0.0)), color, column);
                 }
                 if row.clicked() {
                     chosen = Some(k);

@@ -178,6 +178,10 @@ impl<'a, T: PartialEq> RadioGroup<'a, T> {
     }
 
     /// Stack the options top to bottom instead of left to right.
+    ///
+    /// Options with an icon before their text, such as `(icon, "Flat")`, then
+    /// share one icon column with the text left-aligned after it, as in
+    /// [`ToggleGroup::vertical`].
     pub fn vertical(mut self) -> Self {
         self.orientation = Orientation::Vertical;
         self
